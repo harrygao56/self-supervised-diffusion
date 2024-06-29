@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+classify_image_graph_def.pb
+experiments/
+ambient_logs/
+ambient_samples/
+logs/
+samples/
+mri_data/
+models/
