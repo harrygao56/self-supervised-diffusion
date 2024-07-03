@@ -107,7 +107,7 @@ def fmult(x, smps, mask):
     return y
 
 
-def uniformly_cartesian_mask(img_size, acceleration_rate, acs_percentage: float = 0.2, randomly_return: bool = False):
+def uniformly_cartesian_mask(img_size, acceleration_rate, acs_percentage: float = 0.2, randomly_return: bool = False, get_two: bool = False):
 
     ny = img_size[-1]
 
@@ -126,7 +126,12 @@ def uniformly_cartesian_mask(img_size, acceleration_rate, acs_percentage: float 
                 mask[j, ..., i] = 1
 
     if randomly_return:
-        mask = mask[np.random.randint(0, acceleration_rate)]
+        if get_two:
+            np.random.seed(0)
+            n1, n2 = np.random.choice(np.arange(0, acceleration_rate), size=2, replace=False)
+            return mask[n1], mask[n2]
+        else:
+            mask = mask[np.random.randint(0, acceleration_rate)]
     else:
         mask = mask[0]
 
@@ -414,6 +419,27 @@ def get_subsets(lst, n, subset_idx_start, subset_idx_end):
     for i in range(0, len(lst), n):
         ret += lst[i+subset_idx_start:i+subset_idx_end]
     return ret
+
+
+def get_weighted_mask(img_size, acceleration_rate, acs_percentage: float = 0.2):
+
+    ny = img_size[-1]
+
+    ACS_START_INDEX = (ny // 2) - (int(ny * acs_percentage * (2 / acceleration_rate)) // 2)
+    ACS_END_INDEX = (ny // 2) + (int(ny * acs_percentage * (2 / acceleration_rate)) // 2)
+
+    if ny % 2 == 0:
+        ACS_END_INDEX -= 1
+
+    mask = np.zeros(shape=(acceleration_rate,) + img_size, dtype=np.float32)
+    mask[..., ACS_START_INDEX: (ACS_END_INDEX + 1)] = 1
+
+    for i in range(ny):
+        for j in range(acceleration_rate):
+            if i % acceleration_rate == j:
+                mask[j, ..., i] = 1
+    mask = 1 / np.mean(mask, axis=0)
+    return mask
 
 
 class FastBrainMRI(Dataset):

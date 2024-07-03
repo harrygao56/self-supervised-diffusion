@@ -737,7 +737,6 @@ class InDIModel(UNetModel):
 
     def forward(self, x, timesteps, AtAx=None, **kwargs):
         _, _, og_height, og_width = x.shape
-        # x = th.cat([x.real, x.imag], dim=1)
 
         # Crop input down to dimensions that are compatible with UNet
         x = center_crop(x, self.image_size)

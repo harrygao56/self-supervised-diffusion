@@ -7,7 +7,7 @@ from mpi4py import MPI
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import nibabel as nib
-from guided_diffusion.fastmri_dataloader import FastMRIBrain
+from guided_diffusion.fastmri_dataloader import (FastBrainMRI, uniformly_cartesian_mask, fmult, ftran, get_weighted_mask)
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
@@ -52,33 +52,12 @@ def load_data(
             split
         )
     elif dataset_type == "ambient":
-        dataset = AmbientDatasetComplex(
+        dataset = AmbientDataset(
             split
         )
     elif dataset_type == "fullrank":
         dataset = FullRankDataset(
             split
-        )
-    else:
-        if not data_dir:
-            raise ValueError("unspecified data directory")
-        all_files = _list_image_files_recursively(data_dir)
-        classes = None
-        if class_cond:
-            # Assume classes are the first part of the filename,
-            # before an underscore.
-            class_names = [bf.basename(path).split("_")[0] for path in all_files]
-            sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
-            classes = [sorted_classes[x] for x in class_names]
-        
-        dataset = ImageDataset(
-            image_size,
-            all_files,
-            classes=classes,
-            shard=MPI.COMM_WORLD.Get_rank(),
-            num_shards=MPI.COMM_WORLD.Get_size(),
-            random_crop=random_crop,
-            random_flip=random_flip,
         )
     
     if deterministic:
@@ -149,139 +128,118 @@ class ImageDataset(Dataset):
         return np.transpose(arr, [2, 0, 1]), out_dict
 
 
-class FastMRIDataset(FastMRIBrain):
+class FastMRIDataset(FastBrainMRI):
     # Dataset for conditional diffusion
     def __init__(
             self,
             split,
-            idx_list=ALL_IDX_LIST,
+            acceleration_rate=4,
+            noise_sigma=0,
+            is_return_y_smps_hat=True,
         ):
-            super().__init__(idx_list, split, 1)
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
 
     def __getitem__(self, item):
-        data_dict = super().__getitem__(item)
-        x_gt = data_dict['x']
-        smps = torch.unsqueeze(torch.from_numpy(data_dict['smps']), 0)
-
-        # Generate a cartesian mask for the groundtruth
-        mask = torch.unsqueeze(torch.from_numpy(uniformly_cartesian_mask(x_gt.shape, 4).astype(int)), 0)
-
-        # Apply mask in k-space
-        Ax = fmult(torch.unsqueeze(torch.from_numpy(x_gt), 0), smps, mask)
-        AtAx = ftran(Ax, smps, mask)
-
-        out_dict = {}
-        out_dict["AtAx"] = AtAx
-        return np.expand_dims(x_gt, 0), out_dict
-
-
-class InDIDataset(FastMRIBrain):
-    def __init__(
-            self,
-            split,
-            idx_list=ALL_IDX_LIST,
-        ):
-            super().__init__(idx_list, split, 1)
-
-    def __getitem__(self, item):
-        data_dict = super().__getitem__(item)
-        x_gt = data_dict['x']
-        smps = torch.unsqueeze(torch.from_numpy(data_dict['smps']), 0)
-
-        # Generate a cartesian mask for the groundtruth
-        mask = torch.unsqueeze(torch.from_numpy(uniformly_cartesian_mask(x_gt.shape, 4).astype(int)), 0)
-
-        # Apply mask in k-space
-        Ax = fmult(torch.unsqueeze(torch.from_numpy(x_gt), 0), smps, mask)
-        AtAx = ftran(Ax, smps, mask)
-
-        # Convert from imaginary to 2-channel real
-        x_gt = np.expand_dims(x_gt, 0)
-        x_gt = np.concatenate((x_gt.real, x_gt.imag), axis=0)
-        AtAx = torch.from_numpy(np.concatenate((AtAx.real, AtAx.imag), axis=0))
-
-        out_dict = {}
-        out_dict["AtAx"] = AtAx
-        return x_gt, out_dict
-    
-
-class AmbientDatasetComplex(FastMRIBrain):
-    def __init__(
-            self,
-            split,
-            idx_list=ALL_IDX_LIST,
-        ):
-            super().__init__(idx_list, split, 1)
-
-    def __getitem__(self, item):
-        data_dict = super().__getitem__(item)
-        x_gt = data_dict['x']
-        smps_gt_torch = torch.from_numpy(data_dict['smps'])
-
-        # Generate a cartesian mask for the groundtruth
-        mask = uniformly_cartesian_mask(x_gt.shape, 4).astype(int)
-        mask_torch = torch.from_numpy(mask)
-
-        mask_noisier = uniformly_cartesian_mask(x_gt.shape, 8).astype(int)
-        mask_noisier_torch = torch.from_numpy(mask_noisier)
-
-        # Apply mask in k-space, then use ftran to convert back to image space
-        Ax = fmult(torch.unsqueeze(torch.from_numpy(x_gt), 0), torch.unsqueeze(smps_gt_torch, 0), torch.unsqueeze(mask_torch, 0))
-        AtAx = ftran(Ax, torch.unsqueeze(smps_gt_torch, 0), torch.unsqueeze(mask_torch, 0))
+        x, x_hat, _, _, _, _, _, _ = super().__getitem__(item)
 
         out_dict = {
-            "smps": smps_gt_torch, 
-            "A": mask_torch,
-            "A_hat": mask_noisier_torch,
-            "AtAx": AtAx,
+            "AtAx": x_hat
         }
-        return x_gt, out_dict
+        return x, out_dict
 
-class FullRankDataset(FastMRIBrain):
+
+class InDIDataset(FastBrainMRI):
     def __init__(
             self,
             split,
-            preload=True,
-            idx_list=ALL_IDX_LIST,
+            acceleration_rate=4,
+            noise_sigma=0,
+            is_return_y_smps_hat=True,
         ):
-            super().__init__(idx_list, split, 1)
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
+
+    def __getitem__(self, item):
+        x, x_hat, _, _, _, _, _, _ = super().__get_item__(item)
+        x = torch.cat([x.real, x.imag], axis=0)
+        x_hat = torch.cat([x_hat.real, x_hat.imag], axis=0)
+        print(x.shape)
+        print(x_hat.shape)
+        out_dict = {
+            "AtAx": x_hat
+        }
+        return x, out_dict
+    
+
+class AmbientDataset(FastBrainMRI):
+    def __init__(
+            self,
+            split,
+            acceleration_rate=4,
+            noise_sigma=0,
+            is_return_y_smps_hat=True,
+        ):
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
+
+    def __getitem__(self, item):
+        x, x_hat, smps, smps_hat, y, mask, _, _ = super().__getitem__(item)
+
+        mask_noisier = uniformly_cartesian_mask(x.shape, 8).astype(int)
+        mask_noisier = torch.from_numpy(mask_noisier)
+
+        out_dict = {
+            "smps": smps, 
+            "A": mask,
+            "A_hat": mask_noisier,
+            "AtAx": x_hat,
+        }
+        return x, out_dict
+
+
+class FullRankDataset(FastBrainMRI):
+    def __init__(
+            self,
+            split,
+            acceleration_rate=0,
+            noise_sigma=0,
+            is_return_y_smps_hat=True,
+            preload=True,
+        ):
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
 
             # If preload is set, we preload the masks to make sure we apply the same masks each time
             self.preload = preload
             if preload:
                 self.preloaded_masks = []
-                mask_shape = super().__getitem__(0)['x'].shape
+                mask_shape = super().__getitem__(0)[0].shape
                 for i in range(len(self)):
                     self.preloaded_masks.append(uniformly_cartesian_mask(mask_shape, 4, randomly_return=True, get_two=True))
 
     def __getitem__(self, item):
-        data_dict = super().__getitem__(item)
-        x_gt = data_dict['x']
-        smps_gt_torch = torch.from_numpy(data_dict['smps'])
-        smps_gt_torch = torch.from_numpy(data_dict['smps'])
+        x, _, smps, _, _, _, _, _ = super().__getitem__(item)
 
         # Generate a cartesian mask for the groundtruth
         if self.preload:
             A, A_hat = self.preloaded_masks[item]
         else:
-            A, A_hat = uniformly_cartesian_mask(x_gt.shape, 4, randomly_return=True, get_two=True)
+            A, A_hat = uniformly_cartesian_mask(x.shape, 4, randomly_return=True, get_two=True)
         
         A = torch.from_numpy(A.astype(int))
         A_hat = torch.from_numpy(A_hat.astype(int))
 
         # Apply mask in k-space, then use ftran to convert back to image space
-        Ax = fmult(torch.unsqueeze(torch.from_numpy(x_gt), 0), torch.unsqueeze(smps_gt_torch, 0), torch.unsqueeze(A, 0))
-        AtAx = ftran(Ax, torch.unsqueeze(smps_gt_torch, 0), torch.unsqueeze(A, 0))
+        Ax = fmult(torch.unsqueeze(torch.from_numpy(x), 0), smps, torch.unsqueeze(A, 0))
+        AtAx = ftran(Ax, smps, torch.unsqueeze(A, 0))
 
-        W = torch.from_numpy(get_weighted_mask(x_gt.shape, 4).astype(int))
+        W = torch.from_numpy(get_weighted_mask(x.shape, 4).astype(int))
         out_dict = {
-            "smps": smps_gt_torch, 
+            "smps": smps, 
             "A": A,
             "A_hat": A_hat,
             "AtAx": AtAx,
             "W": W,
         }
-        return x_gt, out_dict
+        return x, out_dict
+
 
 def center_crop_arr(pil_image, image_size):
     # We are not on a new enough PIL to support the `reducing_gap`
@@ -325,6 +283,7 @@ def random_crop_arr(pil_image, image_size, min_crop_frac=0.8, max_crop_frac=1.0)
     crop_y = random.randrange(arr.shape[0] - image_size + 1)
     crop_x = random.randrange(arr.shape[1] - image_size + 1)
     return arr[crop_y : crop_y + image_size, crop_x : crop_x + image_size]
+
 
 def main():
     dataset = FullRankDataset(

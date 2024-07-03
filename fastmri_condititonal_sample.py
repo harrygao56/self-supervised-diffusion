@@ -1,7 +1,7 @@
 import torch.nn.functional as F
 import os
 import argparse
-from guided_diffusion.image_datasets import FastMRIDataset, AmbientDatasetComplex, FullRankDataset, InDIDataset
+from guided_diffusion.image_datasets import FastMRIDataset, AmbientDataset, FullRankDataset, InDIDataset
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -41,13 +41,13 @@ def sample_defaults():
 
 def create_lowres_samples(num_samples, height, width, type, indi, cust_inds=None):
     if indi == True:
-        dataset = InDIDataset("test")
+        dataset = InDIDataset("tst_large")
     elif type == "supervised":
-        dataset = FastMRIDataset("test")
+        dataset = FastMRIDataset("tst_large")
     elif type == "ambient":
-        dataset = AmbientDatasetComplex("test")
+        dataset = AmbientDataset("tst_large")
     elif type == "fullrank":
-        dataset = FullRankDataset("test")
+        dataset = FullRankDataset("tst_large")
     else:
         print("dataset not implemented")
         return

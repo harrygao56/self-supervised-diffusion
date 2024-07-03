@@ -123,7 +123,7 @@ def load_dn_data(data_dir, batch_size, dataset_type, indi, class_cond=False):
         batch_size=batch_size,
         dataset_type=dataset_type,
         indi=indi,
-        split="train",
+        split="tra_large",
         class_cond=class_cond,
     )
     for large_batch, model_kwargs in data:
