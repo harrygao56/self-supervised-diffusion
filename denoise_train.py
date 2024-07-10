@@ -20,10 +20,11 @@ from guided_diffusion.script_util import (
 )
 from guided_diffusion.train_util import TrainLoop, TrainLoopInDI
 import inspect
+import matplotlib.pyplot as plt
 
 def train_defaults():
     return dict(
-        image_size=384,
+        image_size=320,
         num_channels=128,
         num_res_blocks=3,
         num_heads=4,
@@ -44,18 +45,22 @@ def start_train(args):
         logger.log(f'{k}: {v}')
     
     if args.indi == True:
+        print("creating indi model")
         model = indi_create_model(
             **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
         )
     elif args.type == "fullrank":
+        print("creating fullrank model")
         model, diffusion = fullrank_dn_create_model_and_diffusion(
             **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
         )
     elif args.type == "ambient":
+        print("creating ambient model")
         model, diffusion = ambient_dn_create_model_and_diffusion(
             **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
         )
     elif args.type == "supervised":
+        print("creating supervised model")
         model, diffusion = dn_create_model_and_diffusion(
             **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
         )
@@ -95,7 +100,7 @@ def start_train(args):
             weight_decay=args.weight_decay,
             lr_anneal_steps=args.lr_anneal_steps,
             diffusion_steps=args.diffusion_steps,
-            noise=args.indi_noise,
+            noise=args.indinoise,
         ).run_loop()
     else:
         TrainLoop(
@@ -165,9 +170,9 @@ def main():
     parser = create_argparser()
     parser.add_argument("--log_path", required=True)
     parser.add_argument("--type", required=True)
-    parser.add_argument("--indi", required=True, type=bool)
-    parser.add_argument("--run_override", required=False)
-    parser.add_argument("--indi_noise", required=False, type=float)
+    parser.add_argument('--indi', action='store_true')
+    parser.add_argument('--run_override', action='store_true')
+    parser.add_argument("--indinoise", required=False, type=float)
 
     defaults = train_defaults()
     
@@ -181,6 +186,8 @@ def main():
     parser.set_defaults(attention_resolutions=defaults['attention_resolutions'])
     parser.set_defaults(save_interval=defaults['save_interval'])
     parser.set_defaults(lr=defaults['lr'])
+    parser.set_defaults(indi=False)
+    parser.set_defaults(run_override=False)
 
     # Adding defaults to parser
     add_dict_to_argparser(parser, defaults)

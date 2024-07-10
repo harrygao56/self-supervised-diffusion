@@ -44,18 +44,22 @@ def load_data(
     :param random_flip: if True, randomly flip the images for augmentation.
     """
     if indi == True:
+        print("creating indi dataset")
         dataset = InDIDataset(
             split
         )
     elif dataset_type == "supervised":
+        print("creating supervised dataset")
         dataset = FastMRIDataset(
             split
         )
     elif dataset_type == "ambient":
+        print("creating ambient dataset")
         dataset = AmbientDataset(
             split
         )
     elif dataset_type == "fullrank":
+        print("creating fullrank dataset")
         dataset = FullRankDataset(
             split
         )
@@ -134,7 +138,7 @@ class FastMRIDataset(FastBrainMRI):
             self,
             split,
             acceleration_rate=4,
-            noise_sigma=0,
+            noise_sigma=0.01,
             is_return_y_smps_hat=True,
         ):
             super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
@@ -153,17 +157,15 @@ class InDIDataset(FastBrainMRI):
             self,
             split,
             acceleration_rate=4,
-            noise_sigma=0,
+            noise_sigma=0.01,
             is_return_y_smps_hat=True,
         ):
             super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
 
     def __getitem__(self, item):
-        x, x_hat, _, _, _, _, _, _ = super().__get_item__(item)
+        x, x_hat, _, _, _, _, _, _ = super().__getitem__(item)
         x = torch.cat([x.real, x.imag], axis=0)
         x_hat = torch.cat([x_hat.real, x_hat.imag], axis=0)
-        print(x.shape)
-        print(x_hat.shape)
         out_dict = {
             "AtAx": x_hat
         }
@@ -175,7 +177,7 @@ class AmbientDataset(FastBrainMRI):
             self,
             split,
             acceleration_rate=4,
-            noise_sigma=0,
+            noise_sigma=0.01,
             is_return_y_smps_hat=True,
         ):
             super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
@@ -200,7 +202,7 @@ class FullRankDataset(FastBrainMRI):
             self,
             split,
             acceleration_rate=0,
-            noise_sigma=0,
+            noise_sigma=0.01,
             is_return_y_smps_hat=True,
             preload=True,
         ):

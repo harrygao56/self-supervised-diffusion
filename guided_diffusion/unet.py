@@ -690,19 +690,8 @@ class DenoiseModel(UNetModel):
         super().__init__(image_size, in_channels * 4, out_channels * 2, *args, **kwargs)
 
     def forward(self, x, timesteps, AtAx=None, **kwargs):
-        _, _, og_height, og_width = x.shape
         x = th.cat([x.real, x.imag, AtAx.real, AtAx.imag], dim=1)
-
-        # Crop input down to dimensions that are compatible with UNet
-        x = center_crop(x, self.image_size)
-
-        output = super().forward(x, timesteps, **kwargs)
-
-        height_pad = (og_height - self.image_size) // 2
-        width_pad = (og_width - self.image_size) // 2
-
-        # Pad output with 0s to get back to original dimension
-        return F.pad(output, (width_pad, width_pad, height_pad, height_pad), "constant", 0)
+        return super().forward(x, timesteps, **kwargs)
 
 
 class SelfDenoiseModel(UNetModel):
@@ -736,18 +725,7 @@ class InDIModel(UNetModel):
         super().__init__(image_size, in_channels * 2, out_channels * 2, *args, **kwargs)
 
     def forward(self, x, timesteps, AtAx=None, **kwargs):
-        _, _, og_height, og_width = x.shape
-
-        # Crop input down to dimensions that are compatible with UNet
-        x = center_crop(x, self.image_size)
-
-        output = super().forward(x, timesteps, **kwargs)
-
-        height_pad = (og_height - self.image_size) // 2
-        width_pad = (og_width - self.image_size) // 2
-
-        # Pad output with 0s to get back to original dimension
-        return F.pad(output, (width_pad, width_pad, height_pad, height_pad), "constant", 0)
+        return super().forward(x, timesteps, **kwargs)
 
 
 class EncoderUNetModel(nn.Module):

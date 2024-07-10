@@ -23,9 +23,7 @@ import inspect
 
 def sample_defaults():
     return dict(
-        image_size=384,
-        original_height=768,
-        original_width=396,
+        image_size=320,
         num_channels=128,
         num_res_blocks=3,
         num_heads=4,
@@ -39,7 +37,7 @@ def sample_defaults():
     )
 
 
-def create_lowres_samples(num_samples, height, width, type, indi, cust_inds=None):
+def create_lowres_samples(num_samples, image_size, type, indi, cust_inds=None):
     if indi == True:
         dataset = InDIDataset("tst_large")
     elif type == "supervised":
@@ -53,13 +51,13 @@ def create_lowres_samples(num_samples, height, width, type, indi, cust_inds=None
         return
 
     if indi == True:
-        sample_array = np.zeros((num_samples, height, width, 2), dtype=np.float32)
+        sample_array = np.zeros((num_samples, image_size, image_size, 2), dtype=np.float32)
     else:
-        sample_array = np.zeros((num_samples, height, width, 1), dtype=np.complex64)
+        sample_array = np.zeros((num_samples, image_size, image_size, 1), dtype=np.complex64)
 
-    gt_array = np.zeros((num_samples, height, width))
-    mask_arr = np.zeros((num_samples, height, width))
-    smps_arr = np.zeros((num_samples, 20, height, width), dtype=np.complex64)
+    gt_array = np.zeros((num_samples, image_size, image_size))
+    mask_arr = np.zeros((num_samples, image_size, image_size))
+    smps_arr = np.zeros((num_samples, 20, image_size, image_size), dtype=np.complex64)
 
     if cust_inds:
         inds = [int(element) for element in cust_inds]
@@ -92,10 +90,11 @@ def main():
     parser = create_argparser()
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--type", required=True)
-    parser.add_argument("--indi", required=True, type=bool)
     parser.add_argument("--indisteps", required=False, type=int)
-    parser.add_argument('--indi_noise', required=False, type=float)
+    parser.add_argument('--indinoise', required=False, type=float)
     parser.add_argument('--cust', nargs='*', required=False)
+    parser.add_argument('--log_name', required=False)
+    parser.add_argument('--indi', action='store_true')
 
     defaults = sample_defaults()
 
@@ -111,15 +110,17 @@ def main():
     parser.set_defaults(timestep_respacing=defaults['timestep_respacing'])
     parser.set_defaults(num_samples=defaults['num_samples'])
     parser.set_defaults(clip_denoised=defaults['clip_denoised'])
+    parser.set_defaults(indi=False)
+    parser.set_defaults(log_name="sample")
 
     # Adding defaults to parser
     add_dict_to_argparser(parser, defaults)
     args = parser.parse_args()
 
-    lowres_samples, gt_array, masks, smps = create_lowres_samples(args.num_samples, args.original_height, args.original_width, args.type, args.indi, cust_inds=args.cust)
+    lowres_samples, gt_array, masks, smps = create_lowres_samples(args.num_samples, args.image_size, args.type, args.indi, cust_inds=args.cust)
     
     # Take model path and retrieves the directory to get the save path
-    save_path = args.model_path[:(len(args.model_path) - args.model_path[::-1].index("/"))] + "samples"
+    save_path = args.model_path[:(len(args.model_path) - args.model_path[::-1].index("/"))] + args.log_name
 
     os.environ["OPENAI_LOGDIR"] = save_path
 
@@ -232,14 +233,12 @@ def create_samples(args, lowres_sample_array=None, mask_arr=None, smps_arr=None)
         if args.indi == True:
             AtAx = model_kwargs["AtAx"]
             n = torch.randn(AtAx.shape).to(dist_util.dev())
-            sample = AtAx + args.indi_noise * n
+            sample = AtAx + args.indinoise * n
             timesteps = np.arange(args.indisteps, 0, -1)
-            # timesteps = np.linspace(1.0, 0, args.indisteps, endpoint=False)
             with torch.no_grad():
                 for t in timesteps:
                     print(t / args.indisteps)
                     t_tensor = torch.tensor([t / int(args.indisteps)], dtype=torch.float32).repeat(args.batch_size, 1, 1, 1).to(dist_util.dev())
-                    # t_tensor = torch.tensor([t], dtype=torch.float32).repeat(args.batch_size, 1, 1, 1).to(dist_util.dev())
                     t_model = t_tensor.view(args.batch_size)
                     model_output = model(sample, t_model)
                     d = 1 / args.indisteps
@@ -247,7 +246,7 @@ def create_samples(args, lowres_sample_array=None, mask_arr=None, smps_arr=None)
         else:
             sample, _ = diffusion.p_sample_loop(
                 model,
-                (args.batch_size, 2, args.original_height, args.original_width),
+                (args.batch_size, 2, args.image_size, args.image_size),
                 clip_denoised=args.clip_denoised,
                 model_kwargs=model_kwargs,
             )
