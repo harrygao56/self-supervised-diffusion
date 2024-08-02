@@ -13,6 +13,7 @@ from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema, mean_flat
 from .resample import LossAwareSampler, UniformSampler
+from guided_diffusion.fastmri_dataloader import fmult, ftran
 
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
@@ -269,11 +270,13 @@ class TrainLoopInDI(TrainLoop):
         save_interval,
         resume_checkpoint,
         diffusion_steps,
+        type,
         use_fp16=False,
         fp16_scale_growth=1e-3,
         weight_decay=0.0,
         lr_anneal_steps=0,
         noise=0,
+        pt="uniform"
     ):
         self.model = model
         self.data = data
@@ -292,8 +295,8 @@ class TrainLoopInDI(TrainLoop):
         self.fp16_scale_growth = fp16_scale_growth
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
+        self.type = type
 
-        # self.timesteps = np.linspace(0, 1.0, diffusion_steps)
         self.timesteps = np.arange(diffusion_steps, 0, -1)
         self.diffusion_steps = diffusion_steps
 
@@ -366,22 +369,118 @@ class TrainLoopInDI(TrainLoop):
             losses = {}
 
             if last_batch or not self.use_ddp:
-                n = th.randn(micro.shape).to(dist_util.dev())
-                # Eventually change the hard-coded constant variable
-                model_input = (1 - t) * micro + t * micro_cond["AtAx"] + t * self.noise * n
-                t = t.view(micro.shape[0])
-                model_output = self.model(model_input, t, **micro_cond)
-                diff = model_output - micro
-                losses["loss"] = mean_flat(diff ** 2)
-            else:
-                with self.ddp_model.no_sync():
+                if self.type == "supervised":
                     n = th.randn(micro.shape).to(dist_util.dev())
                     model_input = (1 - t) * micro + t * micro_cond["AtAx"] + t * self.noise * n
                     t = t.view(micro.shape[0])
                     model_output = self.model(model_input, t, **micro_cond)
                     diff = model_output - micro
                     losses["loss"] = mean_flat(diff ** 2)
+                elif self.type == "ambient":
+                    A_hat_x = fmult(micro, micro_cond["smps"], micro_cond["A_hat"])
+                    AtA_hat_x = ftran(A_hat_x, micro_cond["smps"], micro_cond["A_hat"])
+                    AtA_hat_x = AtA_hat_x.unsqueeze(1)
+                    AtA_hat_x = th.cat([AtA_hat_x.real, AtA_hat_x.imag], axis=1)
 
+                    micro_cond["AtAx"] = micro_cond["AtAx"].unsqueeze(1)
+                    micro_cond["AtAx"] = th.cat([micro_cond["AtAx"].real, micro_cond["AtAx"].imag], axis=1)
+
+                    n = th.randn(AtA_hat_x.shape).to(dist_util.dev())
+
+                    model_input = (1 - t) * micro_cond["AtAx"] + t * AtA_hat_x + t * self.noise * n
+                    t = t.view(micro.shape[0])
+                    model_output = self.model(model_input, t, **micro_cond)
+                    model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+
+                    A_output = fmult(model_output.contiguous(), micro_cond["smps"], micro_cond["A"])
+                    AtA_output = ftran(A_output, micro_cond["smps"], micro_cond["A"]).unsqueeze(1)
+                    AtA_output = th.cat([AtA_output.real, AtA_output.imag], dim=1)
+
+                    losses["loss"] = mean_flat((AtA_output - micro_cond["AtAx"]) ** 2)
+                elif self.type == "fullrank":
+                    A_hat_x = fmult(micro, micro_cond["smps"], micro_cond["A_hat"])
+                    AtA_hat_x = ftran(A_hat_x, micro_cond["smps"], micro_cond["A_hat"])
+                    AtA_hat_x = th.unsqueeze(AtA_hat_x, 1)
+                    AtA_hat_x = th.cat([AtA_hat_x.real, AtA_hat_x.imag], axis=1)
+
+                    AtAx = micro_cond["AtAx"].unsqueeze(1)
+                    AtAx = th.cat([AtAx.real, AtAx.imag], axis=1)
+
+                    n = th.randn(AtA_hat_x.shape).to(dist_util.dev())
+
+                    model_input = (1 - t) * AtAx + t * AtA_hat_x + t * self.noise * n
+                    t = t.view(micro.shape[0])
+                    model_output = self.model(model_input, t, **micro_cond)
+                    model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+
+                    A_output = fmult(model_output.contiguous(), micro_cond["smps"], micro_cond["A"])
+                    AtA_output = ftran(A_output, micro_cond["smps"], micro_cond["A"])
+
+                    weighted = fmult((AtA_output - micro_cond["AtAx"]), micro_cond["smps"], micro_cond["W"])
+                    weighted = ftran(weighted, micro_cond["smps"], micro_cond["W"]).unsqueeze(1)
+                    
+                    weighted = th.cat([weighted.real, weighted.imag], dim=1)
+
+                    losses["loss"] = mean_flat(weighted ** 2)
+                else:
+                    print("train type not implemented")
+            else:
+                with self.ddp_model.no_sync():
+                    if self.type == "supervised":
+                        n = th.randn(micro.shape).to(dist_util.dev())
+                        model_input = (1 - t) * micro + t * micro_cond["AtAx"] + t * self.noise * n
+                        t = t.view(micro.shape[0])
+                        model_output = self.model(model_input, t, **micro_cond)
+                        diff = model_output - micro
+                        losses["loss"] = mean_flat(diff ** 2)
+                    elif self.type == "ambient":
+                        A_hat_x = fmult(micro, micro_cond["smps"], micro_cond["A_hat"])
+                        AtA_hat_x = ftran(A_hat_x, micro_cond["smps"], micro_cond["A_hat"])
+                        AtA_hat_x = AtA_hat_x.unsqueeze(1)
+                        AtA_hat_x = th.cat([AtA_hat_x.real, AtA_hat_x.imag], axis=1)
+
+                        micro_cond["AtAx"] = micro_cond["AtAx"].unsqueeze(1)
+                        micro_cond["AtAx"] = th.cat([micro_cond["AtAx"].real, micro_cond["AtAx"].imag], axis=1)
+
+                        n = th.randn(AtA_hat_x.shape).to(dist_util.dev())
+
+                        model_input = (1 - t) * micro_cond["AtAx"] + t * AtA_hat_x + t * self.noise * n
+                        t = t.view(micro.shape[0])
+                        model_output = self.model(model_input, t, **micro_cond)
+                        model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+
+                        A_output = fmult(model_output.contiguous(), micro_cond["smps"], micro_cond["A"])
+                        AtA_output = ftran(A_output, micro_cond["smps"], micro_cond["A"]).unsqueeze(1)
+                        AtA_output = th.cat([AtA_output.real, AtA_output.imag], dim=1)
+
+                        losses["loss"] = mean_flat((AtA_output - micro_cond["AtAx"]) ** 2)
+                    elif self.type == "fullrank":
+                        A_hat_x = fmult(micro, micro_cond["smps"], micro_cond["A_hat"])
+                        AtA_hat_x = ftran(A_hat_x, micro_cond["smps"], micro_cond["A_hat"])
+                        AtA_hat_x = th.unsqueeze(AtA_hat_x, 1)
+                        AtA_hat_x = th.cat([AtA_hat_x.real, AtA_hat_x.imag], axis=1)
+
+                        AtAx = micro_cond["AtAx"].unsqueeze(1)
+                        AtAx = th.cat([AtAx.real, AtAx.imag], axis=1)
+
+                        n = th.randn(AtA_hat_x.shape).to(dist_util.dev())
+
+                        model_input = (1 - t) * AtAx + t * AtA_hat_x + t * self.noise * n
+                        t = t.view(micro.shape[0])
+                        model_output = self.model(model_input, t, **micro_cond)
+                        model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+
+                        A_output = fmult(model_output.contiguous(), micro_cond["smps"], micro_cond["A"])
+                        AtA_output = ftran(A_output, micro_cond["smps"], micro_cond["A"])
+
+                        weighted = fmult((AtA_output - micro_cond["AtAx"]), micro_cond["smps"], micro_cond["W"])
+                        weighted = ftran(weighted, micro_cond["smps"], micro_cond["W"]).unsqueeze(1)
+                        
+                        weighted = th.cat([weighted.real, weighted.imag], dim=1)
+
+                        losses["loss"] = mean_flat(weighted ** 2)
+                    else:
+                        print("train type not implemented")
                 
             loss = (losses["loss"] * weights).mean()
             log_loss_dict_indi(

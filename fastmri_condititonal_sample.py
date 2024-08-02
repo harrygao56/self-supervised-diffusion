@@ -1,7 +1,7 @@
 import torch.nn.functional as F
 import os
 import argparse
-from guided_diffusion.image_datasets import FastMRIDataset, AmbientDataset, FullRankDataset, InDIDataset
+from guided_diffusion.image_datasets import FastMRIDataset, AmbientDataset, FullRankDataset
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -15,7 +15,8 @@ from guided_diffusion.script_util import (
     ambient_dn_create_model_and_diffusion,
     args_to_dict,
     add_dict_to_argparser,
-    indi_create_model
+    indi_create_model,
+    self_indi_create_model
 )
 import torch.distributed as dist
 import inspect
@@ -38,23 +39,15 @@ def sample_defaults():
 
 
 def create_lowres_samples(num_samples, image_size, type, indi, cust_inds=None):
-    if indi == True:
-        dataset = InDIDataset("tst_large")
-    elif type == "supervised":
+    if type == "supervised":
         dataset = FastMRIDataset("tst_large")
-    elif type == "ambient":
+    elif type == "ambient" or type == "fullrank":
         dataset = AmbientDataset("tst_large")
-    elif type == "fullrank":
-        dataset = FullRankDataset("tst_large")
     else:
         print("dataset not implemented")
         return
 
-    if indi == True:
-        sample_array = np.zeros((num_samples, image_size, image_size, 2), dtype=np.float32)
-    else:
-        sample_array = np.zeros((num_samples, image_size, image_size, 1), dtype=np.complex64)
-
+    sample_array = np.zeros((num_samples, image_size, image_size, 2), dtype=np.float32)
     gt_array = np.zeros((num_samples, image_size, image_size))
     mask_arr = np.zeros((num_samples, image_size, image_size))
     smps_arr = np.zeros((num_samples, 20, image_size, image_size), dtype=np.complex64)
@@ -69,11 +62,13 @@ def create_lowres_samples(num_samples, image_size, type, indi, cust_inds=None):
         print(i)
         x, dict_out = dataset[i]
         
-        sample_array[curr_it] = np.transpose(dict_out["AtAx"].cpu().detach().numpy(), [1, 2, 0])
-        if indi == True:
+        if type == "supervised":
+            sample_array[curr_it] = np.transpose(dict_out["AtAx"].cpu().detach().numpy(), [1, 2, 0])
             gt_array[curr_it] = abs(x[0,:,:] + 1j*x[1,:,:])
         else:
-            gt_array[curr_it] = abs(x)
+            # sample_array[curr_it] = np.transpose(torch.stack([x.real, x.imag]).cpu().detach().numpy(), [1, 2, 0])
+            sample_array[curr_it] = np.transpose(x, [1, 2, 0])
+            gt_array[curr_it] =  abs(dict_out["x_"])
 
         if type != "supervised":
             mask_arr[curr_it] = dict_out["A"].cpu().detach().numpy()
@@ -127,8 +122,7 @@ def main():
     print("sampling...")
     arr  = create_samples(args=args, lowres_sample_array=lowres_samples, mask_arr=masks, smps_arr=smps)
     arr = arr[:,:,:,0] + 1j * arr[:,:,:,1]
-    if args.indi == True:
-        lowres_samples = np.expand_dims(lowres_samples[:,:,:,0] + 1j * lowres_samples[:,:,:,1], 3)
+    lowres_samples = lowres_samples[:,:,:,0] + 1j * lowres_samples[:,:,:,1]
 
     # Save results
     with open(f"{save_path}/metrics.txt", "w") as f:
@@ -144,7 +138,7 @@ def main():
         }
 
         for i in range(len(lowres_samples)):
-            plt.imshow(abs(lowres_samples[i,:,:,0]), cmap='gray')
+            plt.imshow(abs(lowres_samples[i,:,:]), cmap='gray')
             plt.show()
             plt.savefig(f"{save_path}/lowres{i}")
 
@@ -156,17 +150,14 @@ def main():
             plt.show()
             plt.savefig(f"{save_path}/sample{i}")
 
-            lowres_range = abs(lowres_samples[i,:,:,0]).max() - abs(lowres_samples[i,:,:,0]).min()
-            sample_range = abs(arr[i,:,:]).max() - abs(arr[i,:,:]).min()
-
             error = np.linalg.norm(abs(arr[i,:,:]) - abs(gt_array[i,:,:])) / np.linalg.norm(abs(arr[i,:,:]))
-            lowres_err = np.linalg.norm(abs(lowres_samples[i,:,:,0]) - abs(gt_array[i,:,:])) / np.linalg.norm(abs(gt_array[i,:,:]))
+            lowres_err = np.linalg.norm(abs(lowres_samples[i,:,:]) - abs(gt_array[i,:,:])) / np.linalg.norm(abs(gt_array[i,:,:]))
 
-            psnr = peak_signal_noise_ratio(abs(gt_array[i,:,:]), abs(arr[i,:,:]), data_range=sample_range)
-            lowres_psnr = peak_signal_noise_ratio(abs(gt_array[i,:,:]), abs(lowres_samples[i,:,:,0]), data_range=lowres_range)
+            psnr = peak_signal_noise_ratio(abs(gt_array[i,:,:]), abs(arr[i,:,:]), data_range=1)
+            lowres_psnr = peak_signal_noise_ratio(abs(gt_array[i,:,:]), abs(lowres_samples[i,:,:]), data_range=1)
 
-            ssim = structural_similarity(abs(gt_array[i,:,:]), abs(arr[i,:,:]), data_range=sample_range)
-            lowres_ssim = structural_similarity(abs(gt_array[i,:,:]), abs(lowres_samples[i,:,:,0]), data_range=lowres_range)
+            ssim = structural_similarity(abs(gt_array[i,:,:]), abs(arr[i,:,:]), data_range=1)
+            lowres_ssim = structural_similarity(abs(gt_array[i,:,:]), abs(lowres_samples[i,:,:]), data_range=1)
 
             f.write(f"\nSample {i}\n")
             f.write(f"Lowres Error: {lowres_err}, Sample Error: {error}\n")
@@ -192,24 +183,41 @@ def create_samples(args, lowres_sample_array=None, mask_arr=None, smps_arr=None)
     for k,v in vars(args).items():
         logger.log(f'{k}: {v}')
 
-    if args.indi == True:
-        model = indi_create_model(
-            **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
-        )
+    if args.type == "fullrank":
+        if args.indi == True:
+            print("creating indi fullrank model")
+            model = self_indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating fullrank model")
+            model, diffusion = fullrank_dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
     elif args.type == "ambient":
-        model, diffusion = ambient_dn_create_model_and_diffusion(
-            **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-        )
-    elif args.type == "fullrank":
-        model, diffusion = fullrank_dn_create_model_and_diffusion(
-            **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-        )
+        if args.indi == True:
+            print("creating indi ambient model")
+            model = self_indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating ambient model")
+            model, diffusion = ambient_dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
     elif args.type == "supervised":
-        model, diffusion = dn_create_model_and_diffusion(
-            **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-        )
+        if args.indi == True:
+            print("creating indi supervised model")
+            model = indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating supervised model")
+            model, diffusion = dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
     else:
-        print("Model not declared")
+        print("Type not implemented")
         return
     
     model.load_state_dict(
@@ -222,14 +230,14 @@ def create_samples(args, lowres_sample_array=None, mask_arr=None, smps_arr=None)
     model.eval()
 
     logger.log("loading data...")
-    data = load_data_for_worker(args.batch_size, args.class_cond, lowres_sample_array=lowres_sample_array, mask_arr=mask_arr, smps_arr=smps_arr)
+    data = load_data_for_worker(args.batch_size, args.class_cond, lowres_sample_array=lowres_sample_array, mask_arr=mask_arr, smps_arr=smps_arr, type=args.type)
 
     logger.log("creating samples...")
     all_images = []
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = next(data)
         model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
-        
+
         if args.indi == True:
             AtAx = model_kwargs["AtAx"]
             n = torch.randn(AtAx.shape).to(dist_util.dev())
@@ -240,7 +248,7 @@ def create_samples(args, lowres_sample_array=None, mask_arr=None, smps_arr=None)
                     print(t / args.indisteps)
                     t_tensor = torch.tensor([t / int(args.indisteps)], dtype=torch.float32).repeat(args.batch_size, 1, 1, 1).to(dist_util.dev())
                     t_model = t_tensor.view(args.batch_size)
-                    model_output = model(sample, t_model)
+                    model_output = model(sample, t_model, **model_kwargs)
                     d = 1 / args.indisteps
                     sample = (d / t_tensor) * model_output + (1 - d / t_tensor) * sample
         else:
@@ -273,7 +281,7 @@ def create_samples(args, lowres_sample_array=None, mask_arr=None, smps_arr=None)
     return arr
 
 
-def load_data_for_worker(batch_size, class_cond, lowres_sample_array=None, mask_arr=None, smps_arr=None):
+def load_data_for_worker(batch_size, class_cond, lowres_sample_array=None, mask_arr=None, smps_arr=None, type=None):
     rank = dist.get_rank()
     num_ranks = dist.get_world_size()
     buffer = []
@@ -291,7 +299,10 @@ def load_data_for_worker(batch_size, class_cond, lowres_sample_array=None, mask_
             if len(buffer) == batch_size:
                 batch = torch.from_numpy(np.concatenate([np.expand_dims(arr, 0) for arr in buffer], dtype=lowres_sample_array.dtype))
                 batch = batch.permute(0, 3, 1, 2)
-                res = dict(AtAx=batch)
+                if type == "ambient" or type == "fullrank":
+                    res = dict(AtA_hat_x=batch)
+                else:
+                    res = dict(AtAx=batch)
                 if mask_arr is not None:
                     res["A_hat"] = torch.from_numpy(np.stack(mask_buffer)).float()
                     res["smps"] = torch.from_numpy(np.stack(smps_buffer))

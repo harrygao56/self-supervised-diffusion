@@ -13,7 +13,7 @@ import torch as th
 
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
-from guided_diffusion.fastmri_brain import fmult, ftran
+from guided_diffusion.fastmri_dataloader import fmult, ftran
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
     """
@@ -260,10 +260,8 @@ class GaussianDiffusion:
         B, C = x.shape[:2]
         assert t.shape == (B,)
 
-        if x.shape[1] == 2:
-            model_input = x[:,0,:,:] + 1j*x[:,1,:,:]
-
-            model_input = th.unsqueeze(model_input, 1)
+        if x.shape[1] == 1:
+            model_input = th.cat([x.real, x.imag], axis=1)
             model_output = model(model_input, self._scale_timesteps(t), **model_kwargs)
         else:
             model_output = model(x, self._scale_timesteps(t), **model_kwargs)
@@ -814,8 +812,6 @@ class GaussianDiffusion:
                 ModelMeanType.START_X: x_start,
                 ModelMeanType.EPSILON: noise,
             }[self.model_mean_type]
-            
-            target = th.cat([target.real, target.imag], dim=1)
 
             terms["mse"] = mean_flat((target - model_output) ** 2)
             if "vb" in terms:
@@ -823,34 +819,55 @@ class GaussianDiffusion:
             else:
                 terms["loss"] = terms["mse"]
         elif self.loss_type == LossType.AMBIENT:
-            A_hat_x_t = fmult(x_t, model_kwargs["smps"], model_kwargs["A_hat"])
-            AtA_hat_x_t = ftran(A_hat_x_t, model_kwargs["smps"], model_kwargs["A_hat"])
-            AtA_hat_x_t = th.unsqueeze(AtA_hat_x_t, 1)
+            # AtA_hat_x_t = fmult(x_t, model_kwargs["smps"], model_kwargs["A"])
+            # AtA_hat_x_t = ftran(AtA_hat_x_t, model_kwargs["smps"], model_kwargs["A"])
+            # AtA_hat_x_t = AtA_hat_x_t.unsqueeze(1)
+            # AtA_hat_x_t = th.cat([AtA_hat_x_t.real, AtA_hat_x_t.imag], axis=1)
 
-            model_output = model(AtA_hat_x_t, self._scale_timesteps(t), **model_kwargs)
-            model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+            AtA_hat_x = fmult(model_kwargs['x_'], model_kwargs["smps"], model_kwargs["A_hat"])
+            AtA_hat_x = ftran(AtA_hat_x, model_kwargs["smps"], model_kwargs["A_hat"])
+            AtA_hat_x = AtA_hat_x.unsqueeze(1)
+            AtA_hat_x = th.cat([AtA_hat_x.real, AtA_hat_x.imag], axis=1)
 
-            A_output = fmult(model_output.contiguous(), model_kwargs["smps"], model_kwargs["A"])
-            AtA_output = th.unsqueeze(ftran(A_output, model_kwargs["smps"], model_kwargs["A"]), 1)
+            # model_kwargs["AtAx"] = model_kwargs["AtAx"].unsqueeze(1)
+            # model_kwargs["AtAx"] = th.cat([model_kwargs["AtAx"].real, model_kwargs["AtAx"].imag], axis=1)
 
-            diff = AtA_output - model_kwargs["AtAx"]
-            diff = th.cat([diff.real, diff.imag], dim=1)
+            model_output = model(x_t, self._scale_timesteps(t), AtA_hat_x=AtA_hat_x, **model_kwargs)
 
-            terms["loss"] = mean_flat(diff ** 2)
+            # model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+
+            # A_output = fmult(model_output.contiguous(), model_kwargs["smps"], model_kwargs["A"])
+            # AtA_output = th.unsqueeze(ftran(A_output, model_kwargs["smps"], model_kwargs["A"]), 1)
+            # AtA_output = th.cat([AtA_output.real, AtA_output.imag], dim=1)
+
+            # terms["loss"] = mean_flat((AtA_output - x_start) ** 2)
+            terms["loss"] = mean_flat((model_output - x_start) ** 2)
         elif self.loss_type == LossType.FULL_RANK:
-            A_hat_x_t = fmult(x_t, model_kwargs["smps"], model_kwargs["A_hat"])
-            AtA_hat_x_t = ftran(A_hat_x_t, model_kwargs["smps"], model_kwargs["A_hat"])
-            AtA_hat_x_t = th.unsqueeze(AtA_hat_x_t, 1)
+            # AtA_x_t = fmult(x_t, model_kwargs["smps"], model_kwargs["A_hat"])
+            # AtA_x_t = ftran(AtA_x_t, model_kwargs["smps"], model_kwargs["A_hat"])
+            # AtA_x_t = th.unsqueeze(AtA_x_t, 1)
+            # AtA_x_t = th.cat([AtA_x_t.real, AtA_x_t.imag], axis=1)
 
-            model_output = model(AtA_hat_x_t, self._scale_timesteps(t), **model_kwargs)
-            model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+            AtA_hat_x = fmult(model_kwargs['x_'], model_kwargs["smps"], model_kwargs["A_hat"])
+            AtA_hat_x = ftran(AtA_hat_x, model_kwargs["smps"], model_kwargs["A_hat"])
+            AtA_hat_x = AtA_hat_x.unsqueeze(1)
+            AtA_hat_x = th.cat([AtA_hat_x.real, AtA_hat_x.imag], axis=1)
 
-            A_output = fmult(model_output.contiguous(), model_kwargs["smps"], model_kwargs["A"])
-            AtA_output = th.unsqueeze(ftran(A_output, model_kwargs["smps"], model_kwargs["A"]), 1)
+            # model_output = model(AtA_x_t, self._scale_timesteps(t), AtA_hat_x=AtA_hat_x, **model_kwargs)
+            model_output = model(x_t, self._scale_timesteps(t), AtA_hat_x=AtA_hat_x, **model_kwargs)
 
-            weighted = fmult((AtA_output - model_kwargs["AtAx"]), model_kwargs["smps"], model_kwargs["W"])
-            weighted = ftran(weighted, model_kwargs["smps"], model_kwargs["W"])
-            
+            # model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+
+            # A_output = fmult(model_output.contiguous(), model_kwargs["smps"], model_kwargs["A"])
+            # AtA_output = ftran(A_output, model_kwargs["smps"], model_kwargs["A"])
+
+            # x_start = x_start[:,0,:,:] + 1j*x_start[:,1,:,:]
+
+            diff = model_output - x_start
+            diff = diff[:,0,:,:] + 1j*diff[:,1,:,:]
+            # weighted = fmult((AtA_output - x_start), model_kwargs["smps"], model_kwargs["W"])
+            weighted = fmult(diff, model_kwargs["smps"], model_kwargs["W"])
+            weighted = ftran(weighted, model_kwargs["smps"], model_kwargs["W"]).unsqueeze(1)
             weighted = th.cat([weighted.real, weighted.imag], dim=1)
 
             terms["loss"] = mean_flat(weighted ** 2)

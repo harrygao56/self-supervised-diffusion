@@ -18,7 +18,6 @@ def load_data(
     data_dir,
     batch_size,
     dataset_type="",
-    indi="",
     split="",
     class_cond=False,
     deterministic=False,
@@ -43,12 +42,7 @@ def load_data(
     :param random_crop: if True, randomly crop the images for augmentation.
     :param random_flip: if True, randomly flip the images for augmentation.
     """
-    if indi == True:
-        print("creating indi dataset")
-        dataset = InDIDataset(
-            split
-        )
-    elif dataset_type == "supervised":
+    if dataset_type == "supervised":
         print("creating supervised dataset")
         dataset = FastMRIDataset(
             split
@@ -139,28 +133,10 @@ class FastMRIDataset(FastBrainMRI):
             split,
             acceleration_rate=4,
             noise_sigma=0.01,
+            num_coil_subset=20,
             is_return_y_smps_hat=True,
         ):
-            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
-
-    def __getitem__(self, item):
-        x, x_hat, _, _, _, _, _, _ = super().__getitem__(item)
-
-        out_dict = {
-            "AtAx": x_hat
-        }
-        return x, out_dict
-
-
-class InDIDataset(FastBrainMRI):
-    def __init__(
-            self,
-            split,
-            acceleration_rate=4,
-            noise_sigma=0.01,
-            is_return_y_smps_hat=True,
-        ):
-            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat)
 
     def __getitem__(self, item):
         x, x_hat, _, _, _, _, _, _ = super().__getitem__(item)
@@ -178,43 +154,47 @@ class AmbientDataset(FastBrainMRI):
             split,
             acceleration_rate=4,
             noise_sigma=0.01,
+            num_coil_subset=20,
             is_return_y_smps_hat=True,
         ):
-            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat)
 
     def __getitem__(self, item):
-        x, x_hat, smps, smps_hat, y, mask, _, _ = super().__getitem__(item)
-
+        x, x_hat, smps, _, _, mask, _, _ = super().__getitem__(item)
         mask_noisier = uniformly_cartesian_mask(x.shape, 8).astype(int)
         mask_noisier = torch.from_numpy(mask_noisier)
-
+        x_hat = torch.cat([x_hat.real, x_hat.imag], axis=0)
         out_dict = {
-            "smps": smps, 
-            "A": mask,
-            "A_hat": mask_noisier,
-            "AtAx": x_hat,
+            "smps": smps.squeeze(), 
+            "A": mask.squeeze(),
+            "A_hat": mask_noisier.squeeze(),
+            "x_": x.squeeze(),
+            # "AtAx": x_hat.squeeze(),
         }
-        return x, out_dict
+        # return x.squeeze(), out_dict
+        return x_hat.squeeze(), out_dict
+
 
 
 class FullRankDataset(FastBrainMRI):
     def __init__(
             self,
             split,
-            acceleration_rate=0,
+            acceleration_rate=4,
             noise_sigma=0.01,
+            num_coil_subset=20,
             is_return_y_smps_hat=True,
             preload=True,
         ):
-            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat)
 
-            # If preload is set, we preload the masks to make sure we apply the same masks each time
+            # If preload is True, we preload the masks to make sure we apply the same masks each time
             self.preload = preload
             if preload:
                 self.preloaded_masks = []
                 mask_shape = super().__getitem__(0)[0].shape
                 for i in range(len(self)):
-                    self.preloaded_masks.append(uniformly_cartesian_mask(mask_shape, 4, randomly_return=True, get_two=True))
+                    self.preloaded_masks.append(uniformly_cartesian_mask(mask_shape, 8, randomly_return=True, get_two=True))
 
     def __getitem__(self, item):
         x, _, smps, _, _, _, _, _ = super().__getitem__(item)
@@ -223,24 +203,27 @@ class FullRankDataset(FastBrainMRI):
         if self.preload:
             A, A_hat = self.preloaded_masks[item]
         else:
-            A, A_hat = uniformly_cartesian_mask(x.shape, 4, randomly_return=True, get_two=True)
+            A, A_hat = uniformly_cartesian_mask(x.shape, 8, randomly_return=True, get_two=True)
         
         A = torch.from_numpy(A.astype(int))
         A_hat = torch.from_numpy(A_hat.astype(int))
 
         # Apply mask in k-space, then use ftran to convert back to image space
-        Ax = fmult(torch.unsqueeze(torch.from_numpy(x), 0), smps, torch.unsqueeze(A, 0))
-        AtAx = ftran(Ax, smps, torch.unsqueeze(A, 0))
+        Ax = fmult(x, smps, A)
+        AtAx = ftran(Ax, smps, A)
+        AtAx = torch.cat([AtAx.real, AtAx.imag], axis=0)
 
-        W = torch.from_numpy(get_weighted_mask(x.shape, 4).astype(int))
+        W = torch.from_numpy(get_weighted_mask(x.shape, 8).astype(int))
+
         out_dict = {
-            "smps": smps, 
-            "A": A,
-            "A_hat": A_hat,
-            "AtAx": AtAx,
-            "W": W,
+            "smps": smps.squeeze(), 
+            "A": A.squeeze(),
+            "A_hat": A_hat.squeeze(),
+            # "AtAx": AtAx.squeeze(),
+            "W": W.squeeze(),
+            "x_": x.squeeze(),
         }
-        return x, out_dict
+        return AtAx.squeeze(), out_dict
 
 
 def center_crop_arr(pil_image, image_size):
