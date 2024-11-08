@@ -15,7 +15,6 @@ from guided_diffusion.script_util import (
     fullrank_dn_create_model_and_diffusion,
     ambient_dn_create_model_and_diffusion,
     indi_create_model,
-    self_indi_create_model,
     args_to_dict,
     add_dict_to_argparser,
 )
@@ -45,21 +44,10 @@ def start_train(args):
     for k,v in vars(args).items():
         logger.log(f'{k}: {v}')
     
-    if args.type == "fullrank":
-        if args.indi == True:
-            print("creating indi fullrank model")
-            model = self_indi_create_model(
-                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
-            )
-        else:
-            print("creating fullrank model")
-            model, diffusion = fullrank_dn_create_model_and_diffusion(
-                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-            )
-    elif args.type == "ambient":
+    if args.type == "ambient":
         if args.indi == True:
             print("creating indi ambient model")
-            model = self_indi_create_model(
+            model = indi_create_model(
                 **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
             )
         else:
@@ -67,6 +55,22 @@ def start_train(args):
             model, diffusion = ambient_dn_create_model_and_diffusion(
                 **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
             )
+    elif args.type == "fullrank" or args.type == "fullrank2":
+        if args.indi == True:
+            print("creating indi fullrank model")
+            model = indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating fullrank model")
+            model, diffusion = fullrank_dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
+    elif args.type == "selfindi":
+        print("creating self indi model")
+        model = indi_create_model(
+            **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+        )
     elif args.type == "supervised":
         if args.indi == True:
             print("creating indi supervised model")
@@ -203,7 +207,6 @@ def main():
     parser.set_defaults(lr=defaults['lr'])
     parser.set_defaults(indi=False)
     parser.set_defaults(run_override=False)
-    parser.set_defaults(pt="uniform")
 
     # Adding defaults to parser
     add_dict_to_argparser(parser, defaults)

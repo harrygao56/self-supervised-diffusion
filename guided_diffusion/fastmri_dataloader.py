@@ -107,7 +107,7 @@ def fmult(x, smps, mask):
     return y
 
 
-def uniformly_cartesian_mask(img_size, acceleration_rate, acs_percentage: float = 0.2, randomly_return: bool = False, get_two: bool = False):
+def uniformly_cartesian_mask(img_size, acceleration_rate, acs_percentage: float = 0.2, randomly_return: bool = False, get_two: bool = False, get_specific: int = -1):
 
     ny = img_size[-1]
 
@@ -132,6 +132,8 @@ def uniformly_cartesian_mask(img_size, acceleration_rate, acs_percentage: float 
             return mask[n1], mask[n2]
         else:
             mask = mask[np.random.randint(0, acceleration_rate)]
+    elif get_specific != -1:
+        mask = mask[get_specific]
     else:
         mask = mask[0]
 

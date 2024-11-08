@@ -260,11 +260,13 @@ class GaussianDiffusion:
         B, C = x.shape[:2]
         assert t.shape == (B,)
 
-        if x.shape[1] == 1:
-            model_input = th.cat([x.real, x.imag], axis=1)
-            model_output = model(model_input, self._scale_timesteps(t), **model_kwargs)
-        else:
-            model_output = model(x, self._scale_timesteps(t), **model_kwargs)
+        if model_kwargs["type"] != "supervised":
+            x = x[:,0,:,:] + 1j*x[:,1,:,:]
+            x = fmult(x, model_kwargs["smps"], model_kwargs["M_"])
+            x = ftran(x, model_kwargs["smps"], model_kwargs["M_"]).unsqueeze(1)
+            x = th.cat([x.real, x.imag], axis=1)
+        
+        model_output = model(x, self._scale_timesteps(t), **model_kwargs)
 
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
             assert model_output.shape == (B, C * 2, *x.shape[2:])
@@ -768,109 +770,27 @@ class GaussianDiffusion:
         x_t = self.q_sample(x_start, t, noise=noise)
 
         terms = {}
+        
+        if self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
+            model_output = model(x_t, self._scale_timesteps(t), cond=model_kwargs["x_hat"], **model_kwargs)
 
-        if self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:
-            terms["loss"] = self._vb_terms_bpd(
-                model=model,
-                x_start=x_start,
-                x_t=x_t,
-                t=t,
-                clip_denoised=False,
-                model_kwargs=model_kwargs,
-            )["output"]
-            if self.loss_type == LossType.RESCALED_KL:
-                terms["loss"] *= self.num_timesteps
-        elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
-
-            if self.model_var_type in [
-                ModelVarType.LEARNED,
-                ModelVarType.LEARNED_RANGE,
-            ]:
-                B, C = x_t.shape[:2]
-                assert model_output.shape == (B, C * 2, *x_t.shape[2:])
-                model_output, model_var_values = th.split(model_output, C, dim=1)
-                # Learn the variance using the variational bound, but don't let
-                # it affect our mean prediction.
-                frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
-                terms["vb"] = self._vb_terms_bpd(
-                    model=lambda *args, r=frozen_out: r,
-                    x_start=x_start,
-                    x_t=x_t,
-                    t=t,
-                    clip_denoised=False,
-                )["output"]
-                if self.loss_type == LossType.RESCALED_MSE:
-                    # Divide by 1000 for equivalence with initial implementation.
-                    # Without a factor of 1/1000, the VB term hurts the MSE term.
-                    terms["vb"] *= self.num_timesteps / 1000.0
-
-            target = {
-                ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
-                    x_start=x_start, x_t=x_t, t=t
-                )[0],
-                ModelMeanType.START_X: x_start,
-                ModelMeanType.EPSILON: noise,
-            }[self.model_mean_type]
-
-            terms["mse"] = mean_flat((target - model_output) ** 2)
-            if "vb" in terms:
-                terms["loss"] = terms["mse"] + terms["vb"]
-            else:
-                terms["loss"] = terms["mse"]
-        elif self.loss_type == LossType.AMBIENT:
-            # AtA_hat_x_t = fmult(x_t, model_kwargs["smps"], model_kwargs["A"])
-            # AtA_hat_x_t = ftran(AtA_hat_x_t, model_kwargs["smps"], model_kwargs["A"])
-            # AtA_hat_x_t = AtA_hat_x_t.unsqueeze(1)
-            # AtA_hat_x_t = th.cat([AtA_hat_x_t.real, AtA_hat_x_t.imag], axis=1)
-
-            AtA_hat_x = fmult(model_kwargs['x_'], model_kwargs["smps"], model_kwargs["A_hat"])
-            AtA_hat_x = ftran(AtA_hat_x, model_kwargs["smps"], model_kwargs["A_hat"])
-            AtA_hat_x = AtA_hat_x.unsqueeze(1)
-            AtA_hat_x = th.cat([AtA_hat_x.real, AtA_hat_x.imag], axis=1)
-
-            # model_kwargs["AtAx"] = model_kwargs["AtAx"].unsqueeze(1)
-            # model_kwargs["AtAx"] = th.cat([model_kwargs["AtAx"].real, model_kwargs["AtAx"].imag], axis=1)
-
-            model_output = model(x_t, self._scale_timesteps(t), AtA_hat_x=AtA_hat_x, **model_kwargs)
-
-            # model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
-
-            # A_output = fmult(model_output.contiguous(), model_kwargs["smps"], model_kwargs["A"])
-            # AtA_output = th.unsqueeze(ftran(A_output, model_kwargs["smps"], model_kwargs["A"]), 1)
-            # AtA_output = th.cat([AtA_output.real, AtA_output.imag], dim=1)
-
-            # terms["loss"] = mean_flat((AtA_output - x_start) ** 2)
             terms["loss"] = mean_flat((model_output - x_start) ** 2)
-        elif self.loss_type == LossType.FULL_RANK:
-            # AtA_x_t = fmult(x_t, model_kwargs["smps"], model_kwargs["A_hat"])
-            # AtA_x_t = ftran(AtA_x_t, model_kwargs["smps"], model_kwargs["A_hat"])
-            # AtA_x_t = th.unsqueeze(AtA_x_t, 1)
-            # AtA_x_t = th.cat([AtA_x_t.real, AtA_x_t.imag], axis=1)
+        elif self.loss_type == LossType.AMBIENT or self.loss_type == LossType.FULL_RANK:
+            x_t = x_t[:,0,:,:] + 1j*x_t[:,1,:,:]
+            y_t_ = fmult(x_t, model_kwargs["smps"], model_kwargs["M_"])
+            x_hat_t_ = ftran(y_t_, model_kwargs["smps"], model_kwargs["M_"]).unsqueeze(1)
+            x_hat_t_ = th.cat([x_hat_t_.real, x_hat_t_.imag], axis=1)
+            
+            model_output = model(x_hat_t_, self._scale_timesteps(t), cond=model_kwargs["x_hat_"], **model_kwargs)
+            model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
 
-            AtA_hat_x = fmult(model_kwargs['x_'], model_kwargs["smps"], model_kwargs["A_hat"])
-            AtA_hat_x = ftran(AtA_hat_x, model_kwargs["smps"], model_kwargs["A_hat"])
-            AtA_hat_x = AtA_hat_x.unsqueeze(1)
-            AtA_hat_x = th.cat([AtA_hat_x.real, AtA_hat_x.imag], axis=1)
+            masked_output = fmult(model_output.contiguous(), model_kwargs["smps"], model_kwargs["M"])
 
-            # model_output = model(AtA_x_t, self._scale_timesteps(t), AtA_hat_x=AtA_hat_x, **model_kwargs)
-            model_output = model(x_t, self._scale_timesteps(t), AtA_hat_x=AtA_hat_x, **model_kwargs)
-
-            # model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
-
-            # A_output = fmult(model_output.contiguous(), model_kwargs["smps"], model_kwargs["A"])
-            # AtA_output = ftran(A_output, model_kwargs["smps"], model_kwargs["A"])
-
-            # x_start = x_start[:,0,:,:] + 1j*x_start[:,1,:,:]
-
-            diff = model_output - x_start
-            diff = diff[:,0,:,:] + 1j*diff[:,1,:,:]
-            # weighted = fmult((AtA_output - x_start), model_kwargs["smps"], model_kwargs["W"])
-            weighted = fmult(diff, model_kwargs["smps"], model_kwargs["W"])
-            weighted = ftran(weighted, model_kwargs["smps"], model_kwargs["W"]).unsqueeze(1)
-            weighted = th.cat([weighted.real, weighted.imag], dim=1)
-
-            terms["loss"] = mean_flat(weighted ** 2)
+            if self.loss_type == LossType.FULL_RANK:
+                diff = masked_output - model_kwargs["y"]
+                terms["loss"] = mean_flat(th.view_as_real(diff * model_kwargs["W"].unsqueeze(1)) ** 2)
+            else:
+                terms["loss"] = mean_flat(th.view_as_real((masked_output - model_kwargs["y"])) ** 2)
         else:
             raise NotImplementedError(self.loss_type)
 
