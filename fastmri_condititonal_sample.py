@@ -1,7 +1,8 @@
 import torch.nn.functional as F
 import os
 import argparse
-from guided_diffusion.image_datasets import FastMRIDataset, AmbientDataset, FullRankDataset, InDIDataset
+from guided_diffusion.image_datasets import FastMRIDataset, AmbientDataset, SamplingDataset, SelfInDIDataset
+from guided_diffusion.fastmri_dataloader import (fmult, ftran)
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -19,6 +20,9 @@ from guided_diffusion.script_util import (
 )
 import torch.distributed as dist
 import inspect
+from tqdm import tqdm
+from torch.utils.data import DataLoader, Subset
+import lpips
 
 
 def sample_defaults():
@@ -29,62 +33,12 @@ def sample_defaults():
         num_heads=4,
         diffusion_steps=1000,
         noise_schedule="cosine",
-        batch_size=1,
+        batch_size=4,
         attention_resolutions="16,8",
         timestep_respacing="1000",
-        num_samples=1,
+        num_samples=float('inf'),
         clip_denoised="",
     )
-
-
-def create_lowres_samples(num_samples, image_size, type, indi, cust_inds=None):
-    if indi == True:
-        dataset = InDIDataset("tst_large")
-    elif type == "supervised":
-        dataset = FastMRIDataset("tst_large")
-    elif type == "ambient":
-        dataset = AmbientDataset("tst_large")
-    elif type == "fullrank":
-        dataset = FullRankDataset("tst_large")
-    else:
-        print("dataset not implemented")
-        return
-
-    if indi == True:
-        sample_array = np.zeros((num_samples, image_size, image_size, 2), dtype=np.float32)
-    else:
-        sample_array = np.zeros((num_samples, image_size, image_size, 1), dtype=np.complex64)
-
-    gt_array = np.zeros((num_samples, image_size, image_size))
-    mask_arr = np.zeros((num_samples, image_size, image_size))
-    smps_arr = np.zeros((num_samples, 20, image_size, image_size), dtype=np.complex64)
-
-    if cust_inds:
-        inds = [int(element) for element in cust_inds]
-    else:
-        inds = random.sample(range(len(dataset)), num_samples)
-
-    curr_it = 0
-    for i in inds:
-        print(i)
-        x, dict_out = dataset[i]
-        
-        sample_array[curr_it] = np.transpose(dict_out["AtAx"].cpu().detach().numpy(), [1, 2, 0])
-        if indi == True:
-            gt_array[curr_it] = abs(x[0,:,:] + 1j*x[1,:,:])
-        else:
-            gt_array[curr_it] = abs(x)
-
-        if type != "supervised":
-            mask_arr[curr_it] = dict_out["A"].cpu().detach().numpy()
-            smps_arr[curr_it] = dict_out["smps"].cpu().detach().numpy()
-        
-        curr_it += 1
-
-    if type == "supervised":
-        mask_arr, smps_arr = None, None
-    
-    return sample_array, gt_array, mask_arr, smps_arr
 
 def main():
     parser = create_argparser()
@@ -92,7 +46,7 @@ def main():
     parser.add_argument("--type", required=True)
     parser.add_argument("--indisteps", required=False, type=int)
     parser.add_argument('--indinoise', required=False, type=float)
-    parser.add_argument('--cust', nargs='*', required=False)
+    parser.add_argument('--cust', nargs='*', required=False, type=int)
     parser.add_argument('--log_name', required=False)
     parser.add_argument('--indi', action='store_true')
 
@@ -117,99 +71,75 @@ def main():
     add_dict_to_argparser(parser, defaults)
     args = parser.parse_args()
 
-    lowres_samples, gt_array, masks, smps = create_lowres_samples(args.num_samples, args.image_size, args.type, args.indi, cust_inds=args.cust)
-    
-    # Take model path and retrieves the directory to get the save path
     save_path = args.model_path[:(len(args.model_path) - args.model_path[::-1].index("/"))] + args.log_name
-
     os.environ["OPENAI_LOGDIR"] = save_path
 
-    print("sampling...")
-    arr  = create_samples(args=args, lowres_sample_array=lowres_samples, mask_arr=masks, smps_arr=smps)
-    arr = arr[:,:,:,0] + 1j * arr[:,:,:,1]
-    if args.indi == True:
-        lowres_samples = np.expand_dims(lowres_samples[:,:,:,0] + 1j * lowres_samples[:,:,:,1], 3)
+    if args.type == "selfindi":
+        dataset = SelfInDIDataset(
+            "tst_small"
+        )
+    else:
+        dataset = SamplingDataset(
+            "tst_small"
+        )
 
-    # Save results
-    with open(f"{save_path}/metrics.txt", "w") as f:
-        f.write("Sample metrics:\n")
-        
-        sums = {
-            "error": 0,
-            "lowres_error": 0,
-            "psnr": 0,
-            "lowres_psnr": 0,
-            "ssim": 0,
-            "lowres_ssim": 0
-        }
+    dataloader = DataLoader(
+        dataset, batch_size=args.batch_size, shuffle=True, num_workers=1, generator=torch.Generator().manual_seed(42)
+    )
 
-        for i in range(len(lowres_samples)):
-            plt.imshow(abs(lowres_samples[i,:,:,0]), cmap='gray')
-            plt.show()
-            plt.savefig(f"{save_path}/lowres{i}")
+    if args.cust:
+        subset = Subset(dataloader.dataset, args.cust)
+        dataloader = DataLoader(subset, batch_size=args.batch_size, shuffle=False, num_workers=1)
 
-            plt.imshow(gt_array[i,:,:], cmap='gray')
-            plt.show()
-            plt.savefig(f"{save_path}/gt{i}")
+    print(f"dataset length: {len(dataset)}, dataloder length: {len(dataloader)}")
 
-            plt.imshow(abs(arr[i,:,:]), cmap='gray')
-            plt.show()
-            plt.savefig(f"{save_path}/sample{i}")
+    create_samples(args, dataloader, save_path)
 
-            lowres_range = abs(lowres_samples[i,:,:,0]).max() - abs(lowres_samples[i,:,:,0]).min()
-            sample_range = abs(arr[i,:,:]).max() - abs(arr[i,:,:]).min()
-
-            error = np.linalg.norm(abs(arr[i,:,:]) - abs(gt_array[i,:,:])) / np.linalg.norm(abs(arr[i,:,:]))
-            lowres_err = np.linalg.norm(abs(lowres_samples[i,:,:,0]) - abs(gt_array[i,:,:])) / np.linalg.norm(abs(gt_array[i,:,:]))
-
-            psnr = peak_signal_noise_ratio(abs(gt_array[i,:,:]), abs(arr[i,:,:]), data_range=sample_range)
-            lowres_psnr = peak_signal_noise_ratio(abs(gt_array[i,:,:]), abs(lowres_samples[i,:,:,0]), data_range=lowres_range)
-
-            ssim = structural_similarity(abs(gt_array[i,:,:]), abs(arr[i,:,:]), data_range=sample_range)
-            lowres_ssim = structural_similarity(abs(gt_array[i,:,:]), abs(lowres_samples[i,:,:,0]), data_range=lowres_range)
-
-            f.write(f"\nSample {i}\n")
-            f.write(f"Lowres Error: {lowres_err}, Sample Error: {error}\n")
-            f.write(f"Lowres PSNR: {lowres_psnr}, Sample PSNR: {psnr}\n")
-            f.write(f"Lowres SSIM: {lowres_ssim}, Sample SSIM: {ssim}\n")
-
-            sums["error"] += error
-            sums["lowres_error"] += lowres_err
-            sums["psnr"] += psnr
-            sums["lowres_psnr"] += lowres_psnr
-            sums["ssim"] += ssim
-            sums["lowres_ssim"] += lowres_ssim
-
-        for k, v in sums.items():
-            f.write(f"Average {k}: {v / len(lowres_samples)}\n")
-
-
-def create_samples(args, lowres_sample_array=None, mask_arr=None, smps_arr=None):
-    dist_util.setup_dist()
-    logger.configure()
-
+def load_model(args):
     logger.log("creating model...")
     for k,v in vars(args).items():
         logger.log(f'{k}: {v}')
 
-    if args.indi == True:
+    if args.type == "fullrank":
+        if args.indi == True:
+            print("creating indi fullrank model")
+            model = indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating fullrank model")
+            model, diffusion = fullrank_dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
+    elif args.type == "ambient":
+        if args.indi == True:
+            print("creating indi ambient model")
+            model = indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating ambient model")
+            model, diffusion = fullrank_dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
+    elif args.type == "supervised":
+        if args.indi == True:
+            print("creating indi supervised model")
+            model = indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating supervised model")
+            model, diffusion = dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
+    elif args.type == "selfindi":
+        print("creating self indi model")
         model = indi_create_model(
             **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
         )
-    elif args.type == "ambient":
-        model, diffusion = ambient_dn_create_model_and_diffusion(
-            **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-        )
-    elif args.type == "fullrank":
-        model, diffusion = fullrank_dn_create_model_and_diffusion(
-            **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-        )
-    elif args.type == "supervised":
-        model, diffusion = dn_create_model_and_diffusion(
-            **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-        )
     else:
-        print("Model not declared")
+        print("type not implemented")
         return
     
     model.load_state_dict(
@@ -221,85 +151,136 @@ def create_samples(args, lowres_sample_array=None, mask_arr=None, smps_arr=None)
         model.convert_to_fp16()
     model.eval()
 
-    logger.log("loading data...")
-    data = load_data_for_worker(args.batch_size, args.class_cond, lowres_sample_array=lowres_sample_array, mask_arr=mask_arr, smps_arr=smps_arr)
+    if args.indi:
+        diffusion = None
 
-    logger.log("creating samples...")
-    all_images = []
-    while len(all_images) * args.batch_size < args.num_samples:
-        model_kwargs = next(data)
+    return model, diffusion
+
+def create_samples(args, dataloader, save_path):
+    dist_util.setup_dist()
+    logger.configure()
+
+    model, diffusion = load_model(args)
+    lpips_fun = lpips.LPIPS(net='alex')
+
+    count = 0
+    sums = {
+        "sample_error": 0,
+        "lowres_error": 0,
+        "sample_psnr": 0,
+        "lowres_psnr": 0,
+        "sample_ssim": 0,
+        "lowres_ssim": 0,
+        "sample_lpips": 0,
+        "lowres_lpips": 0
+    }
+
+    for x, model_kwargs in dataloader:
         model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
-        
-        if args.indi == True:
-            AtAx = model_kwargs["AtAx"]
-            n = torch.randn(AtAx.shape).to(dist_util.dev())
-            sample = AtAx + args.indinoise * n
-            timesteps = np.arange(args.indisteps, 0, -1)
-            with torch.no_grad():
-                for t in timesteps:
-                    print(t / args.indisteps)
-                    t_tensor = torch.tensor([t / int(args.indisteps)], dtype=torch.float32).repeat(args.batch_size, 1, 1, 1).to(dist_util.dev())
-                    t_model = t_tensor.view(args.batch_size)
-                    model_output = model(sample, t_model)
-                    d = 1 / args.indisteps
-                    sample = (d / t_tensor) * model_output + (1 - d / t_tensor) * sample
+
+        sample = sample_loop(model, diffusion, x, model_kwargs, args).cpu().numpy()
+        x = x.cpu().numpy()
+        # sample[x == 0.0] = 0.0
+
+        sample = abs(sample[:,0,:,:] + 1j * sample[:,1,:,:])
+        if args.type == "selfindi":
+            lowres = abs(model_kwargs["x_hat__"][:,0,:,:] + 1j * model_kwargs["x_hat__"][:,1,:,:]).cpu().numpy()
         else:
-            sample, _ = diffusion.p_sample_loop(
-                model,
-                (args.batch_size, 2, args.image_size, args.image_size),
-                clip_denoised=args.clip_denoised,
-                model_kwargs=model_kwargs,
-            )
-        
-        sample = sample.permute(0, 2, 3, 1)
-        sample = sample.contiguous()
+            lowres = abs(model_kwargs["x_hat_"][:,0,:,:] + 1j * model_kwargs["x_hat_"][:,1,:,:]).cpu().numpy()
 
-        all_samples = [torch.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(all_samples, sample)  # gather not supported with NCCL
-        for sample in all_samples:
-            all_images.append(sample.cpu().numpy())
-        logger.log(f"created {len(all_images) * args.batch_size} samples")
+        gt = abs(x[:,0,:,:] + 1j * x[:,1,:,:])
 
-    arr = np.concatenate(all_images, axis=0)
-    arr = arr[: args.num_samples]
-    if dist.get_rank() == 0:
-        shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
-        logger.log(f"saving to {out_path}")
-        np.savez(out_path, arr)
+        # np.save(f"{save_path}/samples-batch-{count}", sample)
+        # np.save(f"{save_path}/gt-batch-{count}", gt)
+        # np.save(f"{save_path}/lowres-batch-{count}", lowres)
 
-    dist.barrier()
-    logger.log("sampling complete")
-    return arr
+        for i in range(args.batch_size):
+            curr_it = count + i
+            # plt.imshow(lowres[i,:,:], cmap='gray')
+            # plt.show()
+            # plt.savefig(f"{save_path}/lowres{curr_it}")
 
+            # plt.imshow(gt[i,:,:], cmap='gray')
+            # plt.show()
+            # plt.savefig(f"{save_path}/gt{curr_it}")
 
-def load_data_for_worker(batch_size, class_cond, lowres_sample_array=None, mask_arr=None, smps_arr=None):
-    rank = dist.get_rank()
-    num_ranks = dist.get_world_size()
-    buffer = []
-    label_buffer = []
-    mask_buffer = []
-    smps_buffer = []
-    while True:
-        for i in range(rank, len(lowres_sample_array), num_ranks):
-            buffer.append(lowres_sample_array[i])
-            if class_cond:
-                label_buffer.append(lowres_sample_array[i])
-            if mask_arr is not None:
-                mask_buffer.append(mask_arr[i])
-                smps_buffer.append(smps_arr[i])
-            if len(buffer) == batch_size:
-                batch = torch.from_numpy(np.concatenate([np.expand_dims(arr, 0) for arr in buffer], dtype=lowres_sample_array.dtype))
-                batch = batch.permute(0, 3, 1, 2)
-                res = dict(AtAx=batch)
-                if mask_arr is not None:
-                    res["A_hat"] = torch.from_numpy(np.stack(mask_buffer)).float()
-                    res["smps"] = torch.from_numpy(np.stack(smps_buffer))
-                if class_cond:
-                    res["y"] = torch.from_numpy(np.stack(label_buffer))
-                yield res
-                buffer, label_buffer, mask_buffer, smps_buffer = [], [], [], []
+            # plt.imshow(sample[i,:,:], cmap='gray')
+            # plt.show()
+            # plt.savefig(f"{save_path}/sample{curr_it}")
 
+            sample_psnr, sample_ssim, sample_error, sample_lpips = compute_metrics(sample[i], gt[i], lpips_fun)
+            lowres_psnr, lowres_ssim, lowres_error, lowres_lpips = compute_metrics(lowres[i], gt[i], lpips_fun)
+            with open(f"{save_path}/metrics.txt", "a") as f:
+                f.write(f"\nSample {curr_it}\nLowres Error: {lowres_error}, Sample Error: {sample_error}\nLowres PSNR: {lowres_psnr}, Sample PSNR: {sample_psnr}\nLowres SSIM: {lowres_ssim}, Sample SSIM: {sample_ssim}\nLowres LPIPS: {lowres_lpips}, Sample LPIPS: {sample_lpips}\n__________________\n")
+
+            sums["sample_error"] += sample_error
+            sums["lowres_error"] += lowres_error
+            sums["sample_psnr"] += sample_psnr
+            sums["lowres_psnr"] += lowres_psnr
+            sums["sample_ssim"] += sample_ssim
+            sums["lowres_ssim"] += lowres_ssim
+            sums["sample_lpips"] += sample_lpips
+            sums["lowres_lpips"] += lowres_lpips
+
+        count += args.batch_size
+        print(f"generated {count} samples")
+        if count >= args.num_samples:
+            break
+    
+    with open(f"{save_path}/metrics.txt", "a") as f:
+        for k, v in sums.items():
+            f.write(f"Average {k}: {v / count}\n")
+
+def compute_metrics(lowres, gt, lpips_fun):
+    error = np.linalg.norm(lowres - gt) / np.linalg.norm(gt)
+    psnr = peak_signal_noise_ratio(gt, lowres, data_range=1)
+    ssim = structural_similarity(gt, lowres, data_range=1)
+    lpips_ = lpips_fun.forward(torch.from_numpy(lowres), torch.from_numpy(gt)).squeeze().item()
+    return psnr, ssim, error, lpips_
+
+def sample_loop(model, diffusion, x, model_kwargs, args):
+    if args.indi == True:
+        n = torch.randn(x.shape).to(dist_util.dev())
+        if args.type == "selfindi":
+            sample = model_kwargs["x_hat__"] + args.indinoise * n
+        elif args.type == "supervised":
+            sample = model_kwargs["x_hat"] + args.indinoise * n
+        else:
+            sample = model_kwargs["x_hat_"] + args.indinoise * n
+        timesteps = np.arange(args.indisteps, 0, -1)
+        with torch.no_grad():
+            timesteps = tqdm(timesteps)
+            for t in timesteps:
+                model_input = sample
+                if args.type == "ambient" or args.type == "fullrank":
+                    model_input = model_input[:,0,:,:] + 1j*model_input[:,1,:,:]
+                    model_input = fmult(model_input, model_kwargs["smps"], model_kwargs["M_"])
+                    model_input = ftran(model_input, model_kwargs["smps"], model_kwargs["M_"]).unsqueeze(1)
+                    model_input = torch.cat([model_input.real, model_input.imag], axis=1)
+                t_tensor = torch.tensor([t / int(args.indisteps)], dtype=torch.float32).repeat(args.batch_size, 1, 1, 1).to(dist_util.dev())
+                t_model = t_tensor.view(args.batch_size)
+                model_output = model(model_input, t_model, **model_kwargs)
+                if t != 1.0 and args.type == "selfindi":
+                    model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+                    model_output = fmult(model_output, model_kwargs["smps"], model_kwargs["M_"])
+                    model_output = ftran(model_output, model_kwargs["smps"], model_kwargs["M_"]).unsqueeze(1)
+                    model_output = torch.cat([model_output.real, model_output.imag], axis=1)
+                d = 1 / args.indisteps
+                sample = (d / t_tensor) * model_output + (1 - d / t_tensor) * sample
+    else:
+        model_kwargs["type"] = args.type
+        if args.type == "supervised":
+            model_kwargs["cond"] = model_kwargs["x_hat"]
+        else:
+            model_kwargs["cond"] = model_kwargs["x_hat_"]
+        sample, _ = diffusion.p_sample_loop(
+            model,
+            (args.batch_size, 2, args.image_size, args.image_size),
+            clip_denoised=args.clip_denoised,
+            model_kwargs=model_kwargs,
+        )
+    
+    return sample.contiguous()
 
 def create_argparser():
     defaults = model_and_diffusion_defaults()

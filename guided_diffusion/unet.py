@@ -633,25 +633,17 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, timesteps, y=None):
+    def forward(self, x, timesteps):
         """
         Apply the model to an input batch.
 
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
-        :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
 
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-
-        if self.num_classes is not None:
-            assert y.shape == (x.shape[0],)
-            emb = emb + self.label_emb(y)
         
         h = x.type(self.dtype)
         for module in self.input_blocks:
@@ -689,32 +681,31 @@ class DenoiseModel(UNetModel):
     def __init__(self, image_size, in_channels, out_channels, *args, **kwargs):
         super().__init__(image_size, in_channels * 4, out_channels * 2, *args, **kwargs)
 
-    def forward(self, x, timesteps, AtAx=None, **kwargs):
-        x = th.cat([x.real, x.imag, AtAx.real, AtAx.imag], dim=1)
+    def forward(self, x, timesteps, cond=None, y=None, x_hat=None, x_hat_=None, smps=None, M=None, M_=None, W=None, type=None, **kwargs):
+        x = th.cat([x, cond], dim=1)
         return super().forward(x, timesteps, **kwargs)
 
+class AmbientModel(UNetModel):
+    """
+    Model that performs denoising diffusion on FastMRI dataset
+    """
+    def __init__(self, image_size, in_channels, out_channels, *args, **kwargs):
+        super().__init__(image_size, in_channels * 3, out_channels * 2, *args, **kwargs)
+
+    def forward(self, x, timesteps, cond=None, y=None, x_hat=None, x_hat_=None, smps=None, M=None, M_=None, W=None, type=None, **kwargs):
+        x = th.cat([x, M_.unsqueeze(1)], dim=1)
+        return super().forward(x, timesteps, **kwargs)
 
 class SelfDenoiseModel(UNetModel):
     """
     Model that performs self-supervised denoising
     """
     def __init__(self, image_size, in_channels, out_channels, *args, **kwargs):
-        super().__init__(image_size, in_channels * 5, out_channels * 2, *args, **kwargs)
+        super().__init__(image_size, in_channels * 4, out_channels * 2, *args, **kwargs)
 
-    def forward(self, x, timesteps, AtAx=None, smps=None, A=None, A_hat=None, Ax=None, W=None, **kwargs):
-        _, _, og_height, og_width = x.shape
-        x = th.cat([x.real, x.imag, AtAx.real, AtAx.imag, th.unsqueeze(A_hat, 1)], dim=1)
-
-        # Crop input down to dimensions that are compatible with UNet
-        x = center_crop(x, self.image_size)
-
-        output = super().forward(x, timesteps, **kwargs)
-
-        height_pad = (og_height - self.image_size) // 2
-        width_pad = (og_width - self.image_size) // 2
-
-        # Pad output with 0s to get back to original dimension
-        return F.pad(output, (width_pad, width_pad, height_pad, height_pad), "constant", 0)
+    def forward(self, x, timesteps, cond=None, y=None, x_hat=None, x_hat_=None, smps=None, M=None, M_=None, W=None, type=None, **kwargs):
+        x = th.cat([x, cond], dim=1)
+        return super().forward(x, timesteps, **kwargs)
         
 
 class InDIModel(UNetModel):
@@ -724,7 +715,7 @@ class InDIModel(UNetModel):
     def __init__(self, image_size, in_channels, out_channels, *args, **kwargs):
         super().__init__(image_size, in_channels * 2, out_channels * 2, *args, **kwargs)
 
-    def forward(self, x, timesteps, AtAx=None, **kwargs):
+    def forward(self, x, timesteps, cond=None, y=None, x_hat=None, x_hat_=None, smps=None, M=None, M_=None, M__=None, W=None, x_hat__=None, **kwargs):
         return super().forward(x, timesteps, **kwargs)
 
 

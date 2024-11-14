@@ -44,26 +44,44 @@ def start_train(args):
     for k,v in vars(args).items():
         logger.log(f'{k}: {v}')
     
-    if args.indi == True:
-        print("creating indi model")
+    if args.type == "ambient":
+        if args.indi == True:
+            print("creating indi ambient model")
+            model = indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating ambient model")
+            model, diffusion = ambient_dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
+    elif args.type == "fullrank" or args.type == "fullrank2":
+        if args.indi == True:
+            print("creating indi fullrank model")
+            model = indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating fullrank model")
+            model, diffusion = fullrank_dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
+    elif args.type == "selfindi":
+        print("creating self indi model")
         model = indi_create_model(
             **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
         )
-    elif args.type == "fullrank":
-        print("creating fullrank model")
-        model, diffusion = fullrank_dn_create_model_and_diffusion(
-            **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-        )
-    elif args.type == "ambient":
-        print("creating ambient model")
-        model, diffusion = ambient_dn_create_model_and_diffusion(
-            **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-        )
     elif args.type == "supervised":
-        print("creating supervised model")
-        model, diffusion = dn_create_model_and_diffusion(
-            **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-        )
+        if args.indi == True:
+            print("creating indi supervised model")
+            model = indi_create_model(
+                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+            )
+        else:
+            print("creating supervised model")
+            model, diffusion = dn_create_model_and_diffusion(
+                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
+            )
     else:
         print("Train type not implemented")
         return
@@ -78,7 +96,6 @@ def start_train(args):
         args.data_dir,
         args.batch_size,
         dataset_type=args.type,
-        indi=args.indi,
         class_cond=args.class_cond,
     )
 
@@ -100,7 +117,9 @@ def start_train(args):
             weight_decay=args.weight_decay,
             lr_anneal_steps=args.lr_anneal_steps,
             diffusion_steps=args.diffusion_steps,
+            type=args.type,
             noise=args.indinoise,
+            pt=args.pt,
         ).run_loop()
     else:
         TrainLoop(
@@ -122,12 +141,11 @@ def start_train(args):
         ).run_loop()
 
 
-def load_dn_data(data_dir, batch_size, dataset_type, indi, class_cond=False):
+def load_dn_data(data_dir, batch_size, dataset_type, class_cond=False):
     data = load_data(
         data_dir=data_dir,
         batch_size=batch_size,
         dataset_type=dataset_type,
-        indi=indi,
         split="tra_large",
         class_cond=class_cond,
     )
@@ -173,6 +191,7 @@ def main():
     parser.add_argument('--indi', action='store_true')
     parser.add_argument('--run_override', action='store_true')
     parser.add_argument("--indinoise", required=False, type=float)
+    parser.add_argument("--pt", required=False)
 
     defaults = train_defaults()
     
@@ -194,7 +213,7 @@ def main():
 
     args = parser.parse_args()
 
-    if os.path.isdir(args.log_path) and args.run_override is None:
+    if os.path.isdir(args.log_path) and args.run_override == False:
         raise Exception(f"{args.log_path} already exists")
     os.environ["OPENAI_LOGDIR"] = args.log_path
 

@@ -11,6 +11,7 @@ from guided_diffusion.fastmri_dataloader import (FastBrainMRI, uniformly_cartesi
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import random
 
 
 def load_data(
@@ -18,60 +19,38 @@ def load_data(
     data_dir,
     batch_size,
     dataset_type="",
-    indi="",
     split="",
     class_cond=False,
-    deterministic=False,
     random_crop=False,
     random_flip=True,
 ):
-    """
-    For a dataset, create a generator over (images, kwargs) pairs.
-
-    Each images is an NCHW float tensor, and the kwargs dict contains zero or
-    more keys, each of which map to a batched Tensor of their own.
-    The kwargs dict can be used for class labels, in which case the key is "y"
-    and the values are integer tensors of class labels.
-
-    :param data_dir: a dataset directory.
-    :param batch_size: the batch size of each returned pair.
-    :param image_size: the size to which images are resized.
-    :param class_cond: if True, include a "y" key in returned dicts for class
-                       label. If classes are not available and this is true, an
-                       exception will be raised.
-    :param deterministic: if True, yield results in a deterministic order.
-    :param random_crop: if True, randomly crop the images for augmentation.
-    :param random_flip: if True, randomly flip the images for augmentation.
-    """
-    if indi == True:
-        print("creating indi dataset")
-        dataset = InDIDataset(
-            split
-        )
-    elif dataset_type == "supervised":
+    if dataset_type == "supervised":
         print("creating supervised dataset")
         dataset = FastMRIDataset(
             split
         )
-    elif dataset_type == "ambient":
+    elif dataset_type == "ambient" or dataset_type == "ambient2":
         print("creating ambient dataset")
         dataset = AmbientDataset(
             split
         )
-    elif dataset_type == "fullrank":
+    elif dataset_type == "fullrank" or dataset_type == "fullrank2":
         print("creating fullrank dataset")
         dataset = FullRankDataset(
             split
         )
+    elif dataset_type == "selfindi":
+        print("creating selfindi dataset")
+        dataset = SelfInDIDataset(
+            split
+        )
+
     
-    if deterministic:
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True
-        )
-    else:
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True
-        )
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True, generator=torch.Generator().manual_seed(42)
+    )
+
+    print(f"Dataset size: {len(dataset)}")
     while True:
         yield from loader
 
@@ -139,35 +118,23 @@ class FastMRIDataset(FastBrainMRI):
             split,
             acceleration_rate=4,
             noise_sigma=0.01,
+            num_coil_subset=20,
             is_return_y_smps_hat=True,
         ):
-            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat)
 
     def __getitem__(self, item):
-        x, x_hat, _, _, _, _, _, _ = super().__getitem__(item)
+        x, x_hat, smps, _, _, _, _, _ = super().__getitem__(item)
+        M = uniformly_cartesian_mask(x.shape, 8).astype(int)
+        M = torch.from_numpy(M)
+
+        x = torch.cat([x.real, x.imag])
+        x_hat = torch.cat([x_hat.real, x_hat.imag])
 
         out_dict = {
-            "AtAx": x_hat
-        }
-        return x, out_dict
-
-
-class InDIDataset(FastBrainMRI):
-    def __init__(
-            self,
-            split,
-            acceleration_rate=4,
-            noise_sigma=0.01,
-            is_return_y_smps_hat=True,
-        ):
-            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
-
-    def __getitem__(self, item):
-        x, x_hat, _, _, _, _, _, _ = super().__getitem__(item)
-        x = torch.cat([x.real, x.imag], axis=0)
-        x_hat = torch.cat([x_hat.real, x_hat.imag], axis=0)
-        out_dict = {
-            "AtAx": x_hat
+            "smps": smps.squeeze(), 
+            "M": M.squeeze(),
+            "x_hat": x_hat
         }
         return x, out_dict
     
@@ -178,70 +145,184 @@ class AmbientDataset(FastBrainMRI):
             split,
             acceleration_rate=4,
             noise_sigma=0.01,
+            num_coil_subset=20,
             is_return_y_smps_hat=True,
         ):
-            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat)
 
     def __getitem__(self, item):
-        x, x_hat, smps, smps_hat, y, mask, _, _ = super().__getitem__(item)
+        x, _, smps, _, _, _, _, _ = super().__getitem__(item)
 
-        mask_noisier = uniformly_cartesian_mask(x.shape, 8).astype(int)
-        mask_noisier = torch.from_numpy(mask_noisier)
+        M = uniformly_cartesian_mask(x.shape, 4).astype(int)
+        M = torch.from_numpy(M)
+
+        M_ = uniformly_cartesian_mask(x.shape, 8).astype(int)
+        M_ = torch.from_numpy(M_)
+
+        y = fmult(x, smps, M)
+        x_hat = ftran(y, smps, M)
+
+        y_ = fmult(x, smps, M_)
+        x_hat_ = ftran(y_, smps, M_)
+
+        x = torch.cat([x.real, x.imag])
+        x_hat = torch.cat([x_hat.real, x_hat.imag])
+        x_hat_ = torch.cat([x_hat_.real, x_hat_.imag])
 
         out_dict = {
-            "smps": smps, 
-            "A": mask,
-            "A_hat": mask_noisier,
-            "AtAx": x_hat,
+            "smps": smps.squeeze(), 
+            "M_": M_.squeeze(),
+            "M": M.squeeze(),
+            "y": y.squeeze(),
+            "x_hat_": x_hat_.squeeze(),
+            "x_hat": x_hat.squeeze(),
         }
-        return x, out_dict
+        return x.squeeze(), out_dict
+    
+
+class SelfInDIDataset(FastBrainMRI):
+    def __init__(
+            self,
+            split,
+            acceleration_rate=4,
+            noise_sigma=0.01,
+            num_coil_subset=20,
+            is_return_y_smps_hat=True,
+        ):
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat)
+
+    def __getitem__(self, item):
+        x, _, smps, _, _, _, _, _ = super().__getitem__(item)
+
+        M = uniformly_cartesian_mask(x.shape, 4).astype(int)
+        M = torch.from_numpy(M)
+
+        M_ = uniformly_cartesian_mask(x.shape, 6).astype(int)
+        M_ = torch.from_numpy(M_)
+
+        M__ = uniformly_cartesian_mask(x.shape, 8).astype(int)
+        M__ = torch.from_numpy(M__)
+
+        y = fmult(x, smps, M)
+        x_hat = ftran(y, smps, M)
+
+        y_ = fmult(x, smps, M_)
+        x_hat_ = ftran(y_, smps, M_)
+        
+        y__ = fmult(x, smps, M__)
+        x_hat__ = ftran(y__, smps, M__)
+
+        x = torch.cat([x.real, x.imag])
+        x_hat = torch.cat([x_hat.real, x_hat.imag])
+        x_hat_ = torch.cat([x_hat_.real, x_hat_.imag])
+        x_hat__ = torch.cat([x_hat__.real, x_hat__.imag])
+
+        out_dict = {
+            "smps": smps.squeeze(),
+            "M__": M__.squeeze(),
+            "M_": M_.squeeze(),
+            "M": M.squeeze(),
+            "y": y.squeeze(),
+            "x_hat": x_hat.squeeze(),
+            "x_hat_": x_hat_.squeeze(),
+            "x_hat__": x_hat__.squeeze(),
+        }
+        return x.squeeze(), out_dict
 
 
 class FullRankDataset(FastBrainMRI):
     def __init__(
             self,
             split,
-            acceleration_rate=0,
+            acceleration_rate=4,
             noise_sigma=0.01,
+            num_coil_subset=20,
             is_return_y_smps_hat=True,
             preload=True,
         ):
-            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, is_return_y_smps_hat=is_return_y_smps_hat)
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat)
 
-            # If preload is set, we preload the masks to make sure we apply the same masks each time
+            # If preload is True, we preload the masks to make sure we apply the same masks each time
             self.preload = preload
             if preload:
                 self.preloaded_masks = []
                 mask_shape = super().__getitem__(0)[0].shape
                 for i in range(len(self)):
-                    self.preloaded_masks.append(uniformly_cartesian_mask(mask_shape, 4, randomly_return=True, get_two=True))
+                    self.preloaded_masks.append(uniformly_cartesian_mask(mask_shape, 8, randomly_return=True, get_two=True))
 
     def __getitem__(self, item):
         x, _, smps, _, _, _, _, _ = super().__getitem__(item)
 
         # Generate a cartesian mask for the groundtruth
         if self.preload:
-            A, A_hat = self.preloaded_masks[item]
+            M, M_ = self.preloaded_masks[item]
         else:
-            A, A_hat = uniformly_cartesian_mask(x.shape, 4, randomly_return=True, get_two=True)
+            M, M_ = uniformly_cartesian_mask(x.shape, 8, randomly_return=True, get_two=True)
         
-        A = torch.from_numpy(A.astype(int))
-        A_hat = torch.from_numpy(A_hat.astype(int))
-
-        # Apply mask in k-space, then use ftran to convert back to image space
-        Ax = fmult(torch.unsqueeze(torch.from_numpy(x), 0), smps, torch.unsqueeze(A, 0))
-        AtAx = ftran(Ax, smps, torch.unsqueeze(A, 0))
-
+        M = torch.from_numpy(M.astype(int))
+        M_ = torch.from_numpy(M_.astype(int))
         W = torch.from_numpy(get_weighted_mask(x.shape, 4).astype(int))
-        out_dict = {
-            "smps": smps, 
-            "A": A,
-            "A_hat": A_hat,
-            "AtAx": AtAx,
-            "W": W,
-        }
-        return x, out_dict
 
+        y = fmult(x, smps, M)
+        x_hat = ftran(y, smps, M)
+
+        y_ = fmult(x, smps, M_)
+        x_hat_ = ftran(y_, smps, M_)
+
+        x = torch.cat([x.real, x.imag])
+        x_hat = torch.cat([x_hat.real, x_hat.imag])
+        x_hat_ = torch.cat([x_hat_.real, x_hat_.imag])
+
+        out_dict = {
+            "smps": smps.squeeze(), 
+            "M_": M_.squeeze(),
+            "M": M.squeeze(),
+            "y": y.squeeze(),
+            "x_hat_": x_hat_.squeeze(),
+            "x_hat": x_hat.squeeze(),
+            "W": W.squeeze(),
+        }
+        return x.squeeze(), out_dict
+
+class SamplingDataset(FastBrainMRI):
+    def __init__(
+            self,
+            split,
+            acceleration_rate=4,
+            noise_sigma=0.01,
+            num_coil_subset=20,
+            is_return_y_smps_hat=True,
+        ):
+            super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat)
+
+    def __getitem__(self, item):
+        x, _, smps, _, _, _, _, _ = super().__getitem__(item)
+
+        M = uniformly_cartesian_mask(x.shape, 4).astype(int)
+        M = torch.from_numpy(M)
+
+        M_ = uniformly_cartesian_mask(x.shape, 8).astype(int)
+        M_ = torch.from_numpy(M_)
+
+        y = fmult(x, smps, M)
+        x_hat = ftran(y, smps, M)
+
+        y_ = fmult(x, smps, M_)
+        x_hat_ = ftran(y_, smps, M_)
+
+        x = torch.cat([x.real, x.imag])
+        x_hat = torch.cat([x_hat.real, x_hat.imag])
+        x_hat_ = torch.cat([x_hat_.real, x_hat_.imag])
+
+        out_dict = {
+            "smps": smps.squeeze(), 
+            "M_": M_.squeeze(),
+            "M": M.squeeze(),
+            "y": y.squeeze(),
+            "x_hat_": x_hat_.squeeze(),
+            "x_hat": x_hat.squeeze(),
+        }
+        return x.squeeze(), out_dict
 
 def center_crop_arr(pil_image, image_size):
     # We are not on a new enough PIL to support the `reducing_gap`
@@ -288,16 +369,28 @@ def random_crop_arr(pil_image, image_size, min_crop_frac=0.8, max_crop_frac=1.0)
 
 
 def main():
-    dataset = FullRankDataset(
-            256, "train"
+    dataset = AmbientDataset(
+            "tst_large"
         )
+    
+    x, args = next(dataset)
+    path = "/project/cigserver3/export1/g.harry/self-supervised-diffusion/test"
+    for _ in range(5):
+        plt.imshow(abs(x), cmap='gray')
+        plt.show()
+        plt.savefig(f"{path}/x{i}")
 
-    testset = FullRankDataset(
-            256, "test"
-        )
+        AtAx = abs(args["AtAx"][0,:,:] + 1j * args["AtAx"][1,:,:])
+        plt.imshow(AtAx, cmap='gray')
+        plt.show()
+        plt.savefig(f"{path}/AtAx{i}")
 
-    print(len(dataset))
-    print(len(testset))
+        AtAhat_x = fmult(AtAx, smps, args["A_hat"])
+        AtAhat_x = ftran(AtAhat_x, smps, args["A_hat"])
+        plt.imshow(abs(AtAhat_x), cmap='gray')
+        plt.show()
+        plt.savefig(f"{path}/AtAhat_x{i}")
+
 
     # print(args['x'].shape)
     # print(args['Ax'].shape)

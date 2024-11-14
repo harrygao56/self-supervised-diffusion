@@ -13,6 +13,8 @@ from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema, mean_flat
 from .resample import LossAwareSampler, UniformSampler
+from guided_diffusion.fastmri_dataloader import fmult, ftran
+import matplotlib.pyplot as plt
 
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
@@ -269,11 +271,13 @@ class TrainLoopInDI(TrainLoop):
         save_interval,
         resume_checkpoint,
         diffusion_steps,
+        type,
         use_fp16=False,
         fp16_scale_growth=1e-3,
         weight_decay=0.0,
         lr_anneal_steps=0,
         noise=0,
+        pt=""
     ):
         self.model = model
         self.data = data
@@ -292,8 +296,9 @@ class TrainLoopInDI(TrainLoop):
         self.fp16_scale_growth = fp16_scale_growth
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
+        self.type = type
+        self.pt = pt
 
-        # self.timesteps = np.linspace(0, 1.0, diffusion_steps)
         self.timesteps = np.arange(diffusion_steps, 0, -1)
         self.diffusion_steps = diffusion_steps
 
@@ -347,7 +352,6 @@ class TrainLoopInDI(TrainLoop):
             self.use_ddp = False
             self.ddp_model = self.model
 
-
     def forward_backward(self, batch, cond):
         self.mp_trainer.zero_grad()
         for i in range(0, batch.shape[0], self.microbatch):
@@ -356,32 +360,55 @@ class TrainLoopInDI(TrainLoop):
                 k: v[i : i + self.microbatch].to(dist_util.dev())
                 for k, v in cond.items()
             }
-            last_batch = (i + self.microbatch) >= batch.shape[0]
 
             t = np.random.choice(self.timesteps, size=(micro.shape[0], 1, 1, 1)) / self.diffusion_steps
             t = th.from_numpy(t).float().to(dist_util.dev())
+            if self.pt == "bias_t1":
+                t = th.sin((t * th.pi) / 2)
+                t = th.round(t * self.diffusion_steps) / self.diffusion_steps
+
             weights = th.ones((micro.shape[0],)).to(dist_util.dev()) / micro.shape[0]
 
             # Add potential transform to timesteps according to figure 10 of indi
             losses = {}
 
-            if last_batch or not self.use_ddp:
+            if self.type == "supervised":
                 n = th.randn(micro.shape).to(dist_util.dev())
-                # Eventually change the hard-coded constant variable
-                model_input = (1 - t) * micro + t * micro_cond["AtAx"] + t * self.noise * n
+                model_input = (1 - t) * micro + t * micro_cond["x_hat"] + t * self.noise * n
                 t = t.view(micro.shape[0])
                 model_output = self.model(model_input, t, **micro_cond)
                 diff = model_output - micro
                 losses["loss"] = mean_flat(diff ** 2)
-            else:
-                with self.ddp_model.no_sync():
-                    n = th.randn(micro.shape).to(dist_util.dev())
-                    model_input = (1 - t) * micro + t * micro_cond["AtAx"] + t * self.noise * n
-                    t = t.view(micro.shape[0])
-                    model_output = self.model(model_input, t, **micro_cond)
-                    diff = model_output - micro
-                    losses["loss"] = mean_flat(diff ** 2)
+            elif self.type == "ambient" or self.type == "fullrank":
+                n = th.randn(micro.shape).to(dist_util.dev())
+                x_t = (1 - t) * micro + t * micro_cond["x_hat"] + t * self.noise * n
+                x_t = x_t[:,0,:,:] + 1j*x_t[:,1,:,:]
 
+                y_t_ = fmult(x_t, micro_cond["smps"], micro_cond["M_"])
+                y_t_ = ftran(y_t_, micro_cond["smps"], micro_cond["M_"]).unsqueeze(1)
+                y_t_ = th.cat([y_t_.real, y_t_.imag], axis=1)
+
+                t = t.view(micro.shape[0])
+
+                model_output = self.model(y_t_, t, **micro_cond)
+                model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+
+                masked_output = fmult(model_output.contiguous(), micro_cond["smps"], micro_cond["M"])
+
+                losses["loss"] = mean_flat(th.view_as_real((masked_output - micro_cond["y"])) ** 2)
+            elif self.type == "selfindi":
+                n = th.randn(micro.shape).to(dist_util.dev())
+                y_t = (1 - t) * micro_cond["x_hat_"] + t * micro_cond["x_hat__"] + t * self.noise * n
+
+                t = t.view(micro.shape[0])
+
+                model_output = self.model(y_t, t, **micro_cond)
+                model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
+                masked_output = fmult(model_output.contiguous(), micro_cond["smps"], micro_cond["M"])
+
+                losses["loss"] = mean_flat(th.view_as_real((masked_output - micro_cond["y"])) ** 2)
+            else:
+                print("train type not implemented")
                 
             loss = (losses["loss"] * weights).mean()
             log_loss_dict_indi(
