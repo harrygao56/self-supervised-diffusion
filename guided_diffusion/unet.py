@@ -674,49 +674,27 @@ class SuperResModel(UNetModel):
         return super().forward(x, timesteps, **kwargs)
 
 
-class DenoiseModel(UNetModel):
+class ConditionalModel(UNetModel):
     """
     Model that performs denoising diffusion on FastMRI dataset
     """
     def __init__(self, image_size, in_channels, out_channels, *args, **kwargs):
         super().__init__(image_size, in_channels * 4, out_channels * 2, *args, **kwargs)
 
-    def forward(self, x, timesteps, cond=None, y=None, x_hat=None, x_hat_=None, smps=None, M=None, M_=None, W=None, type=None, **kwargs):
+    def forward(self, x, timesteps, cond=None):
         x = th.cat([x, cond], dim=1)
-        return super().forward(x, timesteps, **kwargs)
-
-class AmbientModel(UNetModel):
-    """
-    Model that performs denoising diffusion on FastMRI dataset
-    """
-    def __init__(self, image_size, in_channels, out_channels, *args, **kwargs):
-        super().__init__(image_size, in_channels * 3, out_channels * 2, *args, **kwargs)
-
-    def forward(self, x, timesteps, cond=None, y=None, x_hat=None, x_hat_=None, smps=None, M=None, M_=None, W=None, type=None, **kwargs):
-        x = th.cat([x, M_.unsqueeze(1)], dim=1)
-        return super().forward(x, timesteps, **kwargs)
-
-class SelfDenoiseModel(UNetModel):
-    """
-    Model that performs self-supervised denoising
-    """
-    def __init__(self, image_size, in_channels, out_channels, *args, **kwargs):
-        super().__init__(image_size, in_channels * 4, out_channels * 2, *args, **kwargs)
-
-    def forward(self, x, timesteps, cond=None, y=None, x_hat=None, x_hat_=None, smps=None, M=None, M_=None, W=None, type=None, **kwargs):
-        x = th.cat([x, cond], dim=1)
-        return super().forward(x, timesteps, **kwargs)
+        return super().forward(x, timesteps)
         
 
-class InDIModel(UNetModel):
+class UnconditionalModel(UNetModel):
     """
     Model that performs denoising diffusion on FastMRI dataset
     """
     def __init__(self, image_size, in_channels, out_channels, *args, **kwargs):
         super().__init__(image_size, in_channels * 2, out_channels * 2, *args, **kwargs)
 
-    def forward(self, x, timesteps, cond=None, y=None, x_hat=None, x_hat_=None, smps=None, M=None, M_=None, M__=None, W=None, x_hat__=None, **kwargs):
-        return super().forward(x, timesteps, **kwargs)
+    def forward(self, x, timesteps, cond=None):
+        return super().forward(x, timesteps)
 
 
 class EncoderUNetModel(nn.Module):

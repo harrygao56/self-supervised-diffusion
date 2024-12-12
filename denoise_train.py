@@ -11,10 +11,8 @@ from guided_diffusion.image_datasets import load_data
 from guided_diffusion.resample import create_named_schedule_sampler
 from guided_diffusion.script_util import (
     model_and_diffusion_defaults, 
-    dn_create_model_and_diffusion,
-    fullrank_dn_create_model_and_diffusion,
-    ambient_dn_create_model_and_diffusion,
-    indi_create_model,
+    unconditional_create_model_and_diffusion,
+    conditional_create_model_and_diffusion,
     args_to_dict,
     add_dict_to_argparser,
 )
@@ -34,6 +32,9 @@ def train_defaults():
         batch_size=4,
         attention_resolutions="16,8",
         save_interval=10000,
+        acceleration_rate=4,
+        acceleration_rate_inter=6,
+        acceleration_rate_further=8,
     )
 
 def start_train(args):
@@ -43,48 +44,15 @@ def start_train(args):
     logger.log("creating model and dataloader...")
     for k,v in vars(args).items():
         logger.log(f'{k}: {v}')
-    
-    if args.type == "ambient":
-        if args.indi == True:
-            print("creating indi ambient model")
-            model = indi_create_model(
-                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
-            )
-        else:
-            print("creating ambient model")
-            model, diffusion = ambient_dn_create_model_and_diffusion(
-                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-            )
-    elif args.type == "fullrank" or args.type == "fullrank2":
-        if args.indi == True:
-            print("creating indi fullrank model")
-            model = indi_create_model(
-                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
-            )
-        else:
-            print("creating fullrank model")
-            model, diffusion = fullrank_dn_create_model_and_diffusion(
-                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-            )
-    elif args.type == "selfindi":
-        print("creating self indi model")
-        model = indi_create_model(
-            **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
+
+    if args.model_type == "conditional":
+        model, diffusion = conditional_create_model_and_diffusion(
+            **args_to_dict(args, inspect.getfullargspec(conditional_create_model_and_diffusion)[0])
         )
-    elif args.type == "supervised":
-        if args.indi == True:
-            print("creating indi supervised model")
-            model = indi_create_model(
-                **args_to_dict(args, inspect.getfullargspec(indi_create_model)[0])
-            )
-        else:
-            print("creating supervised model")
-            model, diffusion = dn_create_model_and_diffusion(
-                **args_to_dict(args, inspect.getfullargspec(dn_create_model_and_diffusion)[0])
-            )
-    else:
-        print("Train type not implemented")
-        return
+    elif args.model_type == "unconditional":
+        model, diffusion = unconditional_create_model_and_diffusion(
+            **args_to_dict(args, inspect.getfullargspec(unconditional_create_model_and_diffusion)[0])
+        )
 
     model.to(dist_util.dev())
     
@@ -97,6 +65,9 @@ def start_train(args):
         args.batch_size,
         dataset_type=args.type,
         class_cond=args.class_cond,
+        acceleration_rate=args.acceleration_rate,
+        acceleration_rate_inter=args.acceleration_rate_inter,
+        acceleration_rate_further=args.acceleration_rate_further,
     )
 
     logger.log("training...")
@@ -141,13 +112,16 @@ def start_train(args):
         ).run_loop()
 
 
-def load_dn_data(data_dir, batch_size, dataset_type, class_cond=False):
+def load_dn_data(data_dir, batch_size, dataset_type, acceleration_rate, acceleration_rate_inter, acceleration_rate_further, class_cond=False):
     data = load_data(
         data_dir=data_dir,
         batch_size=batch_size,
         dataset_type=dataset_type,
         split="tra_large",
         class_cond=class_cond,
+        acceleration_rate=acceleration_rate,
+        acceleration_rate_inter=acceleration_rate_inter,
+        acceleration_rate_further=acceleration_rate_further,
     )
     for large_batch, model_kwargs in data:
         yield large_batch, model_kwargs
@@ -172,7 +146,7 @@ def create_argparser():
     
     defaults = model_and_diffusion_defaults()
 
-    arg_names = inspect.getfullargspec(dn_create_model_and_diffusion)[0]
+    arg_names = inspect.getfullargspec(conditional_create_model_and_diffusion)[0]
     for k in defaults.copy().keys():
         if k not in arg_names:
             del defaults[k]
@@ -188,10 +162,14 @@ def main():
     parser = create_argparser()
     parser.add_argument("--log_path", required=True)
     parser.add_argument("--type", required=True)
+    parser.add_argument('--model_type', required=True)
     parser.add_argument('--indi', action='store_true')
     parser.add_argument('--run_override', action='store_true')
     parser.add_argument("--indinoise", required=False, type=float)
     parser.add_argument("--pt", required=False)
+    parser.add_argument("--acceleration_rate", required=False, type=int)
+    parser.add_argument("--acceleration_rate_inter", required=False, type=int)
+    parser.add_argument("--acceleration_rate_further", required=False, type=int)
 
     defaults = train_defaults()
     
@@ -205,6 +183,9 @@ def main():
     parser.set_defaults(attention_resolutions=defaults['attention_resolutions'])
     parser.set_defaults(save_interval=defaults['save_interval'])
     parser.set_defaults(lr=defaults['lr'])
+    parser.set_defaults(acceleration_rate=defaults['acceleration_rate'])
+    parser.set_defaults(acceleration_rate_inter=defaults['acceleration_rate_inter'])
+    parser.set_defaults(acceleration_rate_further=defaults['acceleration_rate_further'])
     parser.set_defaults(indi=False)
     parser.set_defaults(run_override=False)
 
