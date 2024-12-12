@@ -266,7 +266,7 @@ class GaussianDiffusion:
             x = ftran(x, model_kwargs["smps"], model_kwargs["M_"]).unsqueeze(1)
             x = th.cat([x.real, x.imag], axis=1)
         
-        model_output = model(x, self._scale_timesteps(t), **model_kwargs)
+        model_output = model(x, self._scale_timesteps(t), cond=model_kwargs["cond"])
 
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
             assert model_output.shape == (B, C * 2, *x.shape[2:])
@@ -491,7 +491,7 @@ class GaussianDiffusion:
             progress=progress,
         ):
             final = sample
-        return final["sample"], final["pred_xstart"]
+        return final["sample"].detach(), final["pred_xstart"].detach()
 
     def p_sample_loop_progressive(
         self,
@@ -529,19 +529,39 @@ class GaussianDiffusion:
             indices = tqdm(indices)
 
         for i in indices:
+            img = img.requires_grad_()
             t = th.tensor([i] * shape[0], device=device)
-            with th.no_grad():
-                out = self.p_sample(
-                    model,
-                    img,
-                    t,
-                    clip_denoised=clip_denoised,
-                    denoised_fn=denoised_fn,
-                    cond_fn=cond_fn,
-                    model_kwargs=model_kwargs,
-                )
-                yield out
+            out = self.p_sample(
+                model,
+                img,
+                t,
+                clip_denoised=clip_denoised,
+                denoised_fn=denoised_fn,
+                cond_fn=cond_fn,
+                model_kwargs=model_kwargs,
+            )
+            yield out
+            if model_kwargs["model_type"] == "unconditional":
+                img_ = out["sample"]
+                pred_xstart = out["pred_xstart"]
+                if model_kwargs["type"] == "supervised":
+                    pred_xstart = pred_xstart[:,0,:,:] + 1j * pred_xstart[:,1,:,:]
+                    pred_xstart = fmult(pred_xstart, model_kwargs["smps"], model_kwargs["M"])
+                    pred_xstart = ftran(pred_xstart, model_kwargs["smps"], model_kwargs["M"])
+                    pred_xstart = pred_xstart.unsqueeze(1)
+                    pred_xstart = th.cat([pred_xstart.real, pred_xstart.imag], axis=1)
+                    norm = th.linalg.norm(model_kwargs["x_hat"] - pred_xstart)
+                else:
+                    pred_xstart = pred_xstart[:,0,:,:] + 1j * pred_xstart[:,1,:,:]
+                    pred_xstart = fmult(pred_xstart, model_kwargs["smps"], model_kwargs["M_"])
+                    pred_xstart = ftran(pred_xstart, model_kwargs["smps"], model_kwargs["M_"])
+                    pred_xstart = pred_xstart.unsqueeze(1)
+                    pred_xstart = th.cat([pred_xstart.real, pred_xstart.imag], axis=1)
+                    norm = th.linalg.norm(model_kwargs["x_hat_"] - pred_xstart)
+                img = img_ - 1.0 * th.autograd.grad(outputs=norm, inputs=img)[0]
+            else:
                 img = out["sample"]
+            img = img.detach_()
 
     def ddim_sample(
         self,
@@ -772,7 +792,7 @@ class GaussianDiffusion:
         terms = {}
         
         if self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            model_output = model(x_t, self._scale_timesteps(t), cond=model_kwargs["x_hat"], **model_kwargs)
+            model_output = model(x_t, self._scale_timesteps(t), cond=model_kwargs["x_hat"])
 
             terms["loss"] = mean_flat((model_output - x_start) ** 2)
         elif self.loss_type == LossType.AMBIENT or self.loss_type == LossType.FULL_RANK:
@@ -781,7 +801,7 @@ class GaussianDiffusion:
             x_hat_t_ = ftran(y_t_, model_kwargs["smps"], model_kwargs["M_"]).unsqueeze(1)
             x_hat_t_ = th.cat([x_hat_t_.real, x_hat_t_.imag], axis=1)
             
-            model_output = model(x_hat_t_, self._scale_timesteps(t), cond=model_kwargs["x_hat_"], **model_kwargs)
+            model_output = model(x_hat_t_, self._scale_timesteps(t), cond=model_kwargs["x_hat_"])
             model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
 
             masked_output = fmult(model_output.contiguous(), model_kwargs["smps"], model_kwargs["M"])

@@ -3,7 +3,7 @@ import inspect
 
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
-from .unet import SuperResModel, UNetModel, EncoderUNetModel, SelfDenoiseModel, DenoiseModel, InDIModel, AmbientModel
+from .unet import SuperResModel, UNetModel, EncoderUNetModel, ConditionalModel, UnconditionalModel
 
 NUM_CLASSES = 1000
 
@@ -329,8 +329,7 @@ def sr_create_model_and_diffusion(
     )
     return model, diffusion
 
-
-def ambient_dn_create_model_and_diffusion(
+def unconditional_create_model_and_diffusion(
     image_size,
     class_cond,
     learn_sigma,
@@ -352,8 +351,9 @@ def ambient_dn_create_model_and_diffusion(
     use_scale_shift_norm,
     resblock_updown,
     use_fp16,
+    type,
 ):
-    model = ambient_create_model(
+    model = unconditional_create_model(
         image_size,
         num_channels,
         num_res_blocks,
@@ -378,64 +378,12 @@ def ambient_dn_create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
-        self_type="ambient",
-    )
-    return model, diffusion
-
-def fullrank_dn_create_model_and_diffusion(
-    image_size,
-    class_cond,
-    learn_sigma,
-    num_channels,
-    num_res_blocks,
-    num_heads,
-    num_head_channels,
-    num_heads_upsample,
-    attention_resolutions,
-    dropout,
-    diffusion_steps,
-    noise_schedule,
-    timestep_respacing,
-    use_kl,
-    predict_xstart,
-    rescale_timesteps,
-    rescale_learned_sigmas,
-    use_checkpoint,
-    use_scale_shift_norm,
-    resblock_updown,
-    use_fp16,
-):
-    model = self_dn_create_model(
-        image_size,
-        num_channels,
-        num_res_blocks,
-        learn_sigma=learn_sigma,
-        class_cond=class_cond,
-        use_checkpoint=use_checkpoint,
-        attention_resolutions=attention_resolutions,
-        num_heads=num_heads,
-        num_head_channels=num_head_channels,
-        num_heads_upsample=num_heads_upsample,
-        use_scale_shift_norm=use_scale_shift_norm,
-        dropout=dropout,
-        resblock_updown=resblock_updown,
-        use_fp16=use_fp16,
-    )
-    diffusion = create_gaussian_diffusion(
-        steps=diffusion_steps,
-        learn_sigma=learn_sigma,
-        noise_schedule=noise_schedule,
-        use_kl=use_kl,
-        predict_xstart=True,
-        rescale_timesteps=rescale_timesteps,
-        rescale_learned_sigmas=rescale_learned_sigmas,
-        timestep_respacing=timestep_respacing,
-        self_type="fullrank",
+        self_type=type,
     )
     return model, diffusion
 
 
-def dn_create_model_and_diffusion(
+def conditional_create_model_and_diffusion(
     image_size,
     class_cond,
     learn_sigma,
@@ -457,8 +405,9 @@ def dn_create_model_and_diffusion(
     use_scale_shift_norm,
     resblock_updown,
     use_fp16,
+    type,
 ):
-    model = dn_create_model(
+    model = conditional_create_model(
         image_size,
         num_channels,
         num_res_blocks,
@@ -483,6 +432,7 @@ def dn_create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+        self_type=type,
     )
     return model, diffusion
 
@@ -538,7 +488,7 @@ def sr_create_model(
     )
 
 
-def dn_create_model(
+def conditional_create_model(
     image_size,
     num_channels,
     num_res_blocks,
@@ -560,7 +510,7 @@ def dn_create_model(
     for res in attention_resolutions.split(","):
         attention_ds.append(image_size // int(res))
 
-    return DenoiseModel(
+    return ConditionalModel(
         image_size=image_size,
         in_channels=1,
         model_channels=num_channels,
@@ -579,7 +529,7 @@ def dn_create_model(
         use_fp16=use_fp16,
     )
 
-def self_dn_create_model(
+def unconditional_create_model(
     image_size,
     num_channels,
     num_res_blocks,
@@ -601,89 +551,7 @@ def self_dn_create_model(
     for res in attention_resolutions.split(","):
         attention_ds.append(image_size // int(res))
 
-    return SelfDenoiseModel(
-        image_size=image_size,
-        in_channels=1,
-        model_channels=num_channels,
-        out_channels=(1 if not learn_sigma else 6),
-        num_res_blocks=num_res_blocks,
-        attention_resolutions=tuple(attention_ds),
-        dropout=dropout,
-        channel_mult=channel_mult,
-        num_classes=(NUM_CLASSES if class_cond else None),
-        use_checkpoint=use_checkpoint,
-        num_heads=num_heads,
-        num_head_channels=num_head_channels,
-        num_heads_upsample=num_heads_upsample,
-        use_scale_shift_norm=use_scale_shift_norm,
-        resblock_updown=resblock_updown,
-        use_fp16=use_fp16,
-    )
-
-def ambient_create_model(
-    image_size,
-    num_channels,
-    num_res_blocks,
-    learn_sigma,
-    class_cond,
-    use_checkpoint,
-    attention_resolutions,
-    num_heads,
-    num_head_channels,
-    num_heads_upsample,
-    use_scale_shift_norm,
-    dropout,
-    resblock_updown,
-    use_fp16,
-):
-    channel_mult = (1, 1, 2, 2, 4, 4)
-
-    attention_ds = []
-    for res in attention_resolutions.split(","):
-        attention_ds.append(image_size // int(res))
-
-    return AmbientModel(
-        image_size=image_size,
-        in_channels=1,
-        model_channels=num_channels,
-        out_channels=(1 if not learn_sigma else 6),
-        num_res_blocks=num_res_blocks,
-        attention_resolutions=tuple(attention_ds),
-        dropout=dropout,
-        channel_mult=channel_mult,
-        num_classes=(NUM_CLASSES if class_cond else None),
-        use_checkpoint=use_checkpoint,
-        num_heads=num_heads,
-        num_head_channels=num_head_channels,
-        num_heads_upsample=num_heads_upsample,
-        use_scale_shift_norm=use_scale_shift_norm,
-        resblock_updown=resblock_updown,
-        use_fp16=use_fp16,
-    )
-
-def indi_create_model(
-    image_size,
-    num_channels,
-    num_res_blocks,
-    learn_sigma,
-    class_cond,
-    use_checkpoint,
-    attention_resolutions,
-    num_heads,
-    num_head_channels,
-    num_heads_upsample,
-    use_scale_shift_norm,
-    dropout,
-    resblock_updown,
-    use_fp16,
-):
-    channel_mult = (1, 1, 2, 2, 4, 4)
-
-    attention_ds = []
-    for res in attention_resolutions.split(","):
-        attention_ds.append(image_size // int(res))
-
-    return InDIModel(
+    return UnconditionalModel(
         image_size=image_size,
         in_channels=1,
         model_channels=num_channels,

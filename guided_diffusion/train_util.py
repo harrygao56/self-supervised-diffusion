@@ -376,7 +376,7 @@ class TrainLoopInDI(TrainLoop):
                 n = th.randn(micro.shape).to(dist_util.dev())
                 model_input = (1 - t) * micro + t * micro_cond["x_hat"] + t * self.noise * n
                 t = t.view(micro.shape[0])
-                model_output = self.model(model_input, t, **micro_cond)
+                model_output = self.model(model_input, t)
                 diff = model_output - micro
                 losses["loss"] = mean_flat(diff ** 2)
             elif self.type == "ambient" or self.type == "fullrank":
@@ -390,7 +390,7 @@ class TrainLoopInDI(TrainLoop):
 
                 t = t.view(micro.shape[0])
 
-                model_output = self.model(y_t_, t, **micro_cond)
+                model_output = self.model(y_t_, t)
                 model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
 
                 masked_output = fmult(model_output.contiguous(), micro_cond["smps"], micro_cond["M"])
@@ -398,11 +398,11 @@ class TrainLoopInDI(TrainLoop):
                 losses["loss"] = mean_flat(th.view_as_real((masked_output - micro_cond["y"])) ** 2)
             elif self.type == "selfindi":
                 n = th.randn(micro.shape).to(dist_util.dev())
-                y_t = (1 - t) * micro_cond["x_hat_"] + t * micro_cond["x_hat__"] + t * self.noise * n
+                y_t = (1 - t) * micro_cond["x_hat_bar"] + t * micro_cond["x_hat_"] + t * self.noise * n
 
                 t = t.view(micro.shape[0])
 
-                model_output = self.model(y_t, t, **micro_cond)
+                model_output = self.model(y_t, t)
                 model_output = model_output[:,0,:,:] + 1j*model_output[:,1,:,:]
                 masked_output = fmult(model_output.contiguous(), micro_cond["smps"], micro_cond["M"])
 
