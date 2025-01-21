@@ -36,6 +36,9 @@ def sample_defaults():
         timestep_respacing="1000",
         num_samples=float('inf'),
         clip_denoised="",
+        acceleration_rate=4,
+        acceleration_rate_inter=6,
+        acceleration_rate_further=8,
     )
 
 def main():
@@ -49,6 +52,9 @@ def main():
     parser.add_argument('--log_name', required=False)
     parser.add_argument('--indi', action='store_true')
     parser.add_argument("--consistent", action='store_true')
+    parser.add_argument("--acceleration_rate", required=False, type=int)
+    parser.add_argument("--acceleration_rate_inter", required=False, type=int)
+    parser.add_argument("--acceleration_rate_further", required=False, type=int)
 
     defaults = sample_defaults()
 
@@ -67,6 +73,9 @@ def main():
     parser.set_defaults(indi=False)
     parser.set_defaults(consistent=False)
     parser.set_defaults(log_name="sample")
+    parser.set_defaults(acceleration_rate=defaults['acceleration_rate'])
+    parser.set_defaults(acceleration_rate_inter=defaults['acceleration_rate_inter'])
+    parser.set_defaults(acceleration_rate_further=defaults['acceleration_rate_further'])
 
     # Adding defaults to parser
     add_dict_to_argparser(parser, defaults)
@@ -77,15 +86,22 @@ def main():
 
     if args.type == "selfindi":
         dataset = SelfInDIDataset(
-            "tst_small"
+            "tst_small",
+            acceleration_rate=args.acceleration_rate,
+            acceleration_rate_inter=args.acceleration_rate_inter,
+            acceleration_rate_further=args.acceleration_rate_further,
         )
     elif args.type == "ambient":
         dataset = AmbientDataset(
-            "tst_small"
+            "tst_small",
+            acceleration_rate=args.acceleration_rate,
+            acceleration_rate_further=args.acceleration_rate_further,
         )
     elif args.type == "fullrank":
         dataset = FullRankDataset(
-            "tst_small"
+            "tst_small",
+            acceleration_rate=args.acceleration_rate,
+            acceleration_rate_further=args.acceleration_rate_further,
         )
     elif args.type == "supervised":
         dataset = FastMRIDataset(
