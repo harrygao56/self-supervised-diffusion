@@ -209,14 +209,22 @@ class SelfInDIDataset(FastBrainMRI):
 
     def __getitem__(self, item):
         x, x_hat, smps, _, y, M, _, _ = super().__getitem__(item)
-        M = M.int()
-        
-        ind = torch.where(M[0,0] == 1)[0][0].item()
+        # M = M.int()
 
-        M_bar = uniformly_cartesian_mask(x.shape, self.acceleration_rate_inter, get_specific=ind)
+        M = uniformly_cartesian_mask(x.shape, self.acceleration_rate)
+        M = torch.from_numpy(M).int()
+
+        y = fmult(x_hat, smps, M)
+        x_hat = ftran(y, smps, M)
+        
+        # ind = torch.where(M[0,0] == 1)[0][0].item()
+
+        M_bar = uniformly_cartesian_mask(x.shape, self.acceleration_rate_inter)
+        # M_bar = uniformly_cartesian_mask(x.shape, self.acceleration_rate_inter, get_specific=ind)
         M_bar = torch.from_numpy(M_bar).int()
 
-        M_ = uniformly_cartesian_mask(x.shape, self.acceleration_rate_further, get_specific=ind)
+        M_ = uniformly_cartesian_mask(x.shape, self.acceleration_rate_further)
+        # M_ = uniformly_cartesian_mask(x.shape, self.acceleration_rate_further, get_specific=ind)
         M_ = torch.from_numpy(M_).int()
 
         y_bar = fmult(x_hat, smps, M_bar)
