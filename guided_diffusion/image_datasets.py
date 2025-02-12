@@ -135,8 +135,8 @@ class FastMRIDataset(FastBrainMRI):
             super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat, modality_subset=modality_subset)
 
     def __getitem__(self, item):
-        x, x_hat, smps, _, _, _, _, _ = super().__getitem__(item)
-        M = uniformly_cartesian_mask(x.shape, 8).astype(int)
+        x, _, smps, _, _, _, _, _ = super().__getitem__(item)
+        M = uniformly_cartesian_mask(x.shape, self.acceleration_rate).astype(int)
         M = torch.from_numpy(M)
 
         x = torch.cat([x.real, x.imag])
@@ -165,15 +165,18 @@ class AmbientDataset(FastBrainMRI):
             super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat, modality_subset=modality_subset)
 
     def __getitem__(self, item):
-        x, x_hat, smps, _, y, M, _, _ = super().__getitem__(item)
-        M = M.int()
+        x, _, smps, _, _, _, _, _ = super().__getitem__(item)
 
-        ind = torch.where(M[0,0] == 1)[0][0].item()
+        M = uniformly_cartesian_mask(x.shape, self.acceleration_rate).astype(int)
+        M = torch.from_numpy(M)
 
-        M_ = uniformly_cartesian_mask(x.shape, self.acceleration_rate_further, get_specific=ind)
-        M_ = torch.from_numpy(M_).int()
+        M_ = uniformly_cartesian_mask(x.shape, self.acceleration_rate_further).astype(int)
+        M_ = torch.from_numpy(M_)
 
-        y_ = fmult(x_hat, smps, M_)
+        y = fmult(x, smps, M)
+        x_hat = ftran(y, smps, M)
+
+        y_ = fmult(x, smps, M_)
         x_hat_ = ftran(y_, smps, M_)
 
         x = torch.cat([x.real, x.imag])
@@ -208,29 +211,24 @@ class SelfInDIDataset(FastBrainMRI):
             super().__init__(split, acceleration_rate=acceleration_rate, noise_sigma=noise_sigma, num_coil_subset=num_coil_subset, is_return_y_smps_hat=is_return_y_smps_hat, modality_subset=modality_subset)
 
     def __getitem__(self, item):
-        x, x_hat, smps, _, y, M, _, _ = super().__getitem__(item)
-        # M = M.int()
+        x, _, smps, _, _, _, _, _ = super().__getitem__(item)
 
-        M = uniformly_cartesian_mask(x.shape, self.acceleration_rate)
-        M = torch.from_numpy(M).int()
+        M = uniformly_cartesian_mask(x.shape, self.acceleration_rate).astype(int)
+        M = torch.from_numpy(M)
 
-        y = fmult(x_hat, smps, M)
+        M_bar = uniformly_cartesian_mask(x.shape, self.acceleration_rate_inter).astype(int)
+        M_bar = torch.from_numpy(M_bar)
+
+        M_ = uniformly_cartesian_mask(x.shape, self.acceleration_rate_further).astype(int)
+        M_ = torch.from_numpy(M_)
+
+        y = fmult(x, smps, M)
         x_hat = ftran(y, smps, M)
-        
-        # ind = torch.where(M[0,0] == 1)[0][0].item()
 
-        M_bar = uniformly_cartesian_mask(x.shape, self.acceleration_rate_inter)
-        # M_bar = uniformly_cartesian_mask(x.shape, self.acceleration_rate_inter, get_specific=ind)
-        M_bar = torch.from_numpy(M_bar).int()
-
-        M_ = uniformly_cartesian_mask(x.shape, self.acceleration_rate_further)
-        # M_ = uniformly_cartesian_mask(x.shape, self.acceleration_rate_further, get_specific=ind)
-        M_ = torch.from_numpy(M_).int()
-
-        y_bar = fmult(x_hat, smps, M_bar)
+        y_bar = fmult(x, smps, M_bar)
         x_hat_bar = ftran(y_bar, smps, M_bar)
         
-        y_ = fmult(x_hat, smps, M_)
+        y_ = fmult(x, smps, M_)
         x_hat_ = ftran(y_, smps, M_)
 
         x = torch.cat([x.real, x.imag])
@@ -240,13 +238,13 @@ class SelfInDIDataset(FastBrainMRI):
 
         out_dict = {
             "smps": smps.squeeze(),
-            "M_": M_.squeeze(),
             "M_bar": M_bar.squeeze(),
+            "M_": M_.squeeze(),
             "M": M.squeeze(),
             "y": y.squeeze(),
             "x_hat": x_hat.squeeze(),
-            "x_hat_": x_hat_.squeeze(),
             "x_hat_bar": x_hat_bar.squeeze(),
+            "x_hat_": x_hat_.squeeze(),
         }
         return x.squeeze(), out_dict
 
